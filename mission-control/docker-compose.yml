@@ -1,0 +1,13 @@
+services:
+  mission-control:
+    build: .
+    container_name: mission-control
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8090:8090" # loopback only; reachable via the tunnel
+    volumes:
+      - ./services.json:/app/services.json:ro
+    environment:
+      SERVICES_FILE: /app/services.json
+      PORT: "8090"
+      TZ: ${TZ:-Asia/Kuala_Lumpur}

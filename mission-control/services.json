@@ -1,0 +1,7 @@
+[
+  { "name": "Website",     "url": "https://seanneol.com" },
+  { "name": "Go App",      "url": "https://app.seanneol.com/healthz" },
+  { "name": "Python API",  "url": "https://api.seanneol.com/healthz" },
+  { "name": "Proxmox GUI", "url": "https://proxmox.seanneol.com" },
+  { "name": "Mission Control", "url": "https://home.seanneol.com/healthz" }
+]
