@@ -8,7 +8,7 @@ app = FastAPI(title="homelab-api", version="0.1.0")
 
 @app.get("/")
 def root():
-    return {"service": "api.seanneol.com", "status": "🚀 running"}
+    return {"service": "api.seanneol.com", "status": "running"}
 
 
 @app.get("/healthz")
