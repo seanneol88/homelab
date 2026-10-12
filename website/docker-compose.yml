@@ -1,0 +1,11 @@
+services:
+  web:
+    image: nginx:alpine
+    container_name: website
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:80" # loopback only: reachable ONLY via the Cloudflare tunnel
+    volumes:
+      - ./site:/usr/share/nginx/html:ro
+    environment:
+      TZ: ${TZ:-Asia/Kuala_Lumpur}

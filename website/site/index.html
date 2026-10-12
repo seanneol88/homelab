@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>seanneol.com</title>
+<style>
+  body{margin:0;min-height:100vh;display:flex;flex-direction:column;align-items:center;
+       justify-content:center;font-family:system-ui,sans-serif;
+       background:linear-gradient(135deg,#0f2027,#203a43,#2c5364);color:#eaf2f8}
+  h1{font-size:3rem;margin:0}.sub{opacity:.75;margin:.5rem 0 2rem}
+  .cards{display:flex;gap:1rem;flex-wrap:wrap;justify-content:center}
+  a.card{background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.15);
+         border-radius:12px;padding:1.2rem 1.6rem;color:#eaf2f8;text-decoration:none;
+         transition:.2s;min-width:150px;text-align:center}
+  a.card:hover{background:rgba(255,255,255,.18);transform:translateY(-3px)}
+  .card b{display:block;font-size:1.1rem}.card span{font-size:.85rem;opacity:.7}
+  footer{position:fixed;bottom:1rem;font-size:.8rem;opacity:.5}
+</style>
+</head>
+<body>
+  <h1>seanneol.com</h1>
+  <p class="sub">Self-hosted on my own Proxmox homelab ⚡</p>
+  <div class="cards">
+    <a class="card" href="https://app.seanneol.com"><b>Go App</b><span>app.seanneol.com</span></a>
+    <a class="card" href="https://api.seanneol.com"><b>Python API</b><span>api.seanneol.com</span></a>
+    <a class="card" href="https://status.seanneol.com"><b>Status</b><span>uptime monitor</span></a>
+  </div>
+  <footer>Served by nginx in Docker · delivered through a Cloudflare Tunnel · no open ports</footer>
+</body>
+</html>
