@@ -1,0 +1,19 @@
+tunnel: 29f51fc5-a210-4cf3-9c64-4245005008bb
+credentials-file: /etc/cloudflared/29f51fc5-a210-4cf3-9c64-4245005008bb.json
+
+ingress:
+  - hostname: seanneol.com
+    service: http://localhost:8080
+  - hostname: www.seanneol.com
+    service: http://localhost:8080
+  - hostname: portainer.seanneol.com
+    service: https://172.17.0.1:9443
+    originRequest:
+      noTLSVerify: true
+  - hostname: proxmox.seanneol.com
+    service: https://192.168.0.100:8006
+    originRequest:
+      noTLSVerify: true
+  - hostname: home.seanneol.com
+    service: http://localhost:8090
+  - service: http_status:404
