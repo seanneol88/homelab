@@ -1,0 +1,9 @@
+services:
+  python-api:
+    build: .
+    container_name: python-api
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8082:8000"
+    environment:
+      TZ: ${TZ:-Asia/Kuala_Lumpur}
