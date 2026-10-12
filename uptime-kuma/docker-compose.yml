@@ -1,0 +1,19 @@
+services:
+  uptime-kuma:
+    image: louislam/uptime-kuma:2
+    container_name: uptime-kuma
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3001:3001"
+    volumes:
+      - kuma-data:/app/data
+    environment:
+      TZ: ${TZ:-Asia/Kuala_Lumpur}
+    networks:
+      - mc-net
+networks:
+  mc-net:
+    external: true
+    name: mission-control_default
+volumes:
+  kuma-data: {}
