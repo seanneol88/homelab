@@ -2,15 +2,12 @@ package main
 
 import (
 	"encoding/json"
-	"html/template"
 	"log"
 	"net/http"
 	"os"
 	"sync"
 	"time"
 )
-
-// ---------- data ----------
 
 type Service struct {
 	Name string `json:"name"`
@@ -19,17 +16,15 @@ type Service struct {
 
 type Result struct {
 	Service
-	Up        bool
-	LatencyMs int64
-	CheckedAt string
+	Up        bool   `json:"up"`
+	LatencyMs int64  `json:"latency"`
+	CheckedAt string `json:"checked"`
 }
 
 var (
 	mu      sync.RWMutex
 	results []Result
 )
-
-// ---------- health checking ----------
 
 func check(s Service) Result {
 	start := time.Now()
@@ -39,12 +34,7 @@ func check(s Service) Result {
 	if resp != nil {
 		resp.Body.Close()
 	}
-	return Result{
-		Service:   s,
-		Up:        up,
-		LatencyMs: time.Since(start).Milliseconds(),
-		CheckedAt: time.Now().Format("15:04:05"),
-	}
+	return Result{s, up, time.Since(start).Milliseconds(), time.Now().Format("15:04:05")}
 }
 
 func pollAll(svcs []Service) {
@@ -52,7 +42,7 @@ func pollAll(svcs []Service) {
 	var wg sync.WaitGroup
 	for i, s := range svcs {
 		wg.Add(1)
-		go func(i int, s Service) { // check all services at the same time
+		go func(i int, s Service) {
 			defer wg.Done()
 			out[i] = check(s)
 		}(i, s)
@@ -63,13 +53,10 @@ func pollAll(svcs []Service) {
 	mu.Unlock()
 }
 
-// ---------- web page ----------
-
-var page = template.Must(template.New("dash").Parse(`<!DOCTYPE html>
+const page = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="30">
 <title>Mission Control</title>
 <style>
  body{margin:0;font-family:system-ui,sans-serif;background:#0d1117;color:#e6edf3;
@@ -84,33 +71,29 @@ var page = template.Must(template.New("dash").Parse(`<!DOCTYPE html>
 </head>
 <body>
  <h1>&#128640; Mission Control</h1>
- <p class="sub">seanneol.com homelab &middot; auto-refresh 30s</p>
- <div class="grid">
- {{range .}}
-  <div class="card">
-   {{if .Up}}<span class="up">&#9679; UP</span>{{else}}<span class="down">&#9679; DOWN</span>{{end}}
-   <b>&nbsp;{{.Name}}</b>
-   <p>{{.URL}}</p>
-   <p>{{.LatencyMs}} ms &middot; checked {{.CheckedAt}}</p>
-  </div>
- {{end}}
- </div>
+ <p class="sub">seanneol.com homelab &middot; live</p>
+ <div class="grid" id="grid"></div>
+<script>
+function refresh() {
+  fetch('/api/status').then(function(r){ return r.json(); }).then(function(data){
+    var html = '';
+    for (var i = 0; i < data.length; i++) {
+      var s = data[i];
+      html += '<div class="card">' +
+        '<span class="' + (s.up ? 'up' : 'down') + '">&#9679; ' + (s.up ? 'UP' : 'DOWN') + '</span>' +
+        '<b>&nbsp;' + s.name + '</b>' +
+        '<p>' + s.url + '</p>' +
+        '<p>' + s.latency + ' ms &middot; checked ' + s.checked + '</p>' +
+      '</div>';
+    }
+    document.getElementById('grid').innerHTML = html;
+  });
+}
+refresh();
+setInterval(refresh, 0000);
+</script>
 </body>
-</html>`))
-
-func dashboard(w http.ResponseWriter, r *http.Request) {
-	mu.RLock()
-	data := results
-	mu.RUnlock()
-	page.Execute(w, data)
-}
-
-func healthz(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-}
-
-// ---------- main ----------
+</html>`
 
 func main() {
 	servicesFile := os.Getenv("SERVICES_FILE")
@@ -132,17 +115,28 @@ func main() {
 	}
 
 	pollAll(svcs) // first check immediately
-	go func() {   // then re-check every 30s in the background
-		for range time.Tick(30 * time.Second) {
+	go func() {   // then re-check every 10s in the background
+		for range time.Tick(0* time.Second) {
 			pollAll(svcs)
 		}
 	}()
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /{$}", dashboard)
-	mux.HandleFunc("GET /healthz", healthz)
+	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.Write([]byte(page))
+	})
+	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) {
+		mu.RLock()
+		defer mu.RUnlock()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(results)
+	})
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("ok"))
+	})
 
-		log.Printf("mission control listening on :%s, watching %d services", port, len(svcs))
+	log.Printf("mission control listening on :%s, watching %d services", port, len(svcs))
 	log.Fatal(http.ListenAndServe(":"+port, mux))
 }
 
