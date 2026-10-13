@@ -50,9 +50,9 @@ async function load(silent){
     const notes = await r.json();
     document.getElementById('count').textContent = Array.isArray(notes) ? notes.length : ' ? ';
     if(!notes.length){ body.innerHTML = '<div class="empty">no notes yet — write the first one ✍️</div>'; return; }
-    body.innerHTML = notes.map(n => esc(
-      `<div class="note"><span class="num">#${n.id}</span><div>${n.text}</div><span class="date">${fmt(n.created_at)}</span><button class="del" type="button" data-id="${n.id}" title="delete">✕</button></div>`
-    )).join('');
+    body.innerHTML = notes.map(n =>
+      `<div class="note"><span class="num">#${n.id}</span><div>${esc(String(n.text))}</div><span class="date">${fmt(n.created_at)}</span><button class="del" type="button" data-id="${n.id}" title="delete">✕</button></div>`
+    ).join('');
   }catch(e){ if(!silent){ const p=document.getElementById('err'); p.textContent='could not load notes: '+e.message; p.style.display='block'; setTimeout(()=>p.style.display='none',5000);} }
 }
 document.getElementById('notes').addEventListener('click', async e => {
@@ -70,7 +70,7 @@ document.getElementById('add').onclick = async () => {
   if(!t.value.trim()){ t.focus(); return; }
   btn.disabled = true;
   try{
-    const r = await fetch(API, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({text:t.value.trim(), content:t.value.trim()})});
+    const r = await fetch(API, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({text:t.value.trim()})});
     if(!r.ok) throw new Error('HTTP '+r.status);
     t.value=''; load(true);
   }catch(e){ alert('add failed: '+e.message); } finally{ btn.disabled = false; }
