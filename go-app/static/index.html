@@ -6,68 +6,75 @@
 :root{color-scheme:dark}
 *{box-sizing:border-box}
 body{margin:0;font:15px/1.55 -apple-system,"Segoe UI",Roboto,Arial,sans-serif;background:#0b0f14;color:#e6edf3}
-.wrap{max-width:720px;margin:0 auto;padding:28px 18px 60px}
-h1{font-size:22px;margin:0}
-.sub{color:#7d8ba0;font-size:13px;margin:4px 0 18px}
-.card{background:#10151d;border:1px solid #1e2633;border-radius:14px;padding:16px 18px;margin:12px 0}
-.row{display:flex;gap:10px}
-textarea{flex:1;resize:vertical;min-height:44px;background:#0d1220;border:1px solid #263040;color:#e6edf3;
-  border-radius:10px;padding:10px 12px;font:inherit}
-button{background:#1f7a4d;border:0;color:#fff;font-weight:600;border-radius:10px;padding:10px 16px;cursor:pointer}
-button:hover{background:#218a58}
-.note{display:flex;gap:12px;align-items:flex-start}
-.note .id{color:#4d637d;font:12px ui-monospace,Menlo,monospace;padding-top:3px}
-.note .txt{flex:1;white-space:pre-wrap;word-break:break-word}
-.note .ts{color:#7d8ba0;font-size:12px;white-space:nowrap}
-.err{background:#3a1519;border:1px solid #6b2b32;color:#ffb4ab;border-radius:10px;padding:10px 12px;margin:12px 0;display:none}
-.headrow{display:flex;align-items:center;gap:12px}
-.headcount{background:#122b1e;color:#9be3b1;border-radius:20px;padding:2px 12px;font-size:13px;font-weight:600}
-.toplink{color:#9be3b1;text-decoration:none;font-size:13px;margin-left:auto}
+main{max-width:860px;margin:0 auto;padding:48px 20px 80px}
+h1{font-size:22px;letter-spacing:.4px;display:flex;align-items:center;gap:10px}
+.count{background:#12331f;color:#3fb950;border-radius:999px;padding:2px 10px;font-size:13px;font-weight:600}
+.sub{color:#7d8590;font-size:13px;margin:6px 0 26px}
+.box{display:flex;gap:10px;background:#0d1117;border:1px solid #21262d;border-radius:14px;padding:14px}
+textarea{flex:1;background:#0b0f14;border:1px solid #21262d;border-radius:10px;color:#e6edf3;padding:10px 12px;min-height:64px;resize:vertical;font:inherit}
+textarea:focus{outline:none;border-color:#58a6ff66}
+button.add{border:0;border-radius:10px;background:#238636;color:#fff;padding:0 22px;font-weight:600;cursor:pointer;transition:.15s}
+button.add:hover{background:#2ea043}
+button.add:disabled{opacity:.5;cursor:wait}
+.note{display:flex;gap:14px;align-items:center;background:#0d1117;border:1px solid #21262d;border-radius:12px;padding:12px 14px;margin-top:10px}
+.note .num{color:#7d8590;font-size:12px;min-width:2.2em;text-align:right}
+.note div{flex:1}
+.date{color:#7d8590;font-size:12px}
+button.del{flex:none;width:26px;height:26px;border-radius:8px;border:1px solid #21262d;background:#121a26;color:#7d8590;cursor:pointer;font-size:12px;line-height:1;visibility:hidden;transition:.12s}
+.note:hover .del{visibility:visible}
+.del:hover{border-color:#f85149;color:#f85149;background:#2a1618}
+.empty{color:#7d8590;border:1px dashed #21262d;border-radius:12px;padding:26px;text-align:center}
+.err{color:#f85149;background:#2a1618;border:1px solid #f8514933;border-radius:10px;padding:10px 14px;margin:14px 0;display:none}
+a.status{font-size:13px;color:#58a6ff;text-decoration:none}
 </style></head>
-<body><div class="wrap">
-
-<div class="headrow">
-  <h1>📓 seanneol notes</h1>
-  <span class="headcount" id="count">…</span>
-  <a class="toplink" href="https://status.seanneol.com/status">status ↗</a>
-</div>
-<p class="sub">Go API + Postgres on my own Proxmox box · served by the same binary</p>
-
-<div class="err" id="err"></div>
-
-<div class="card row">
-  <textarea id="box" placeholder="write a note…" rows="2"></textarea>
-  <button id="btn" onclick="addNote()">Add</button>
-</div>
-
-<div id="list"></div>
-</div>
+<body><main>
+  <h1>📓 seanneol notes <span class="count" id="count">0</span><span style="flex:1"></span>
+    <a class="status" href="https://uptime.seanneol.com" target="_blank">status ↗</a></h1>
+  <div class="sub">Go API + Postgres on my own Proxmox box · served by the same binary</div>
+  <div class="box">
+    <textarea id="text" placeholder="write a note…"></textarea>
+    <button class="add" id="add" type="button">Add</button>
+  </div>
+  <p class="err" id="err"></p>
+  <div id="notes"></div>
+</main>
 <script>
-const $ = id => document.getElementById(id);
-function fmt(t){ const d=new Date(t); return isNaN(d)? t :
-  new Intl.DateTimeFormat('en-MY',{dateStyle:'medium',timeStyle:'short',timeZone:'Asia/Kuala_Lumpur'}).format(d); }
-function err(m){ $('err').textContent=m; $('err').style.display=m?'block':'none'; }
-async function load(){
+const API = '/api/notes';
+const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+const fmt = s => new Intl.DateTimeFormat('en-MY',{timeZone:'Asia/Kuala_Lumpur',day:'2-digit',month:'short',year:'numeric',hour:'numeric',minute:'2-digit',hour12:true}).format(new Date(s)).replace(',',' ·');
+async function load(silent){
+  const body = document.getElementById('notes');
   try{
-    const r = await fetch('/api/notes'); if(!r.ok) throw 'GET /api/notes: '+r.status;
-    const data = await r.json();
-    $('count').textContent = data.length;
-    $('list').innerHTML = data.map(n=>{
-      const id  = n.id ?? n.ID;
-      const txt = n.text ?? n.Text ?? n.content ?? n.Content ?? '';
-      const ts  = n.created_at ?? n.CreatedAt ?? n.createdAt ?? '';
-      return `<div class="card note"><div class="id">#${id}</div><div class="txt">${txt}</div><div class="ts">${fmt(ts)}</div></div>`;
-    }).join('');
-    err('');
-  }catch(e){ err('⚠️ '+e); }
+    const r = await fetch(API, {cache:'no-store'});
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const notes = await r.json();
+    document.getElementById('count').textContent = Array.isArray(notes) ? notes.length : ' ? ';
+    if(!notes.length){ body.innerHTML = '<div class="empty">no notes yet — write the first one ✍️</div>'; return; }
+    body.innerHTML = notes.map(n => esc(
+      `<div class="note"><span class="num">#${n.id}</span><div>${n.text}</div><span class="date">${fmt(n.created_at)}</span><button class="del" type="button" data-id="${n.id}" title="delete">✕</button></div>`
+    )).join('');
+  }catch(e){ if(!silent){ const p=document.getElementById('err'); p.textContent='could not load notes: '+e.message; p.style.display='block'; setTimeout(()=>p.style.display='none',5000);} }
 }
-async function addNote(){
-  const v = $('box').value.trim(); if(!v) return;
-  const r = await fetch('/api/notes',{method:'POST',headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({text:v, content:v})}); /* dual-key: server ignores whichever it doesn't read */
-  if(!r.ok){ err('POST failed: '+r.status); return; }
-  $('box').value=''; load();
-}
-$('box').addEventListener('keydown', e=>{ if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)) addNote(); });
-load(); setInterval(load, 8000);
-</script></body></html>
+document.getElementById('notes').addEventListener('click', async e => {
+  const b = e.target.closest('.del'); if(!b) return;
+  if(!confirm('Delete note #' + b.dataset.id + ' ?')) return;
+  try{
+    const r = await fetch(API + '/' + b.dataset.id, {method:'DELETE'});
+    if(!r.ok) throw new Error('HTTP ' + r.status);
+    load(true);
+  }catch(err){ alert('delete failed: ' + err.message); }
+});
+document.getElementById('add').onclick = async () => {
+  const t = document.getElementById('text');
+  const btn = document.getElementById('add');
+  if(!t.value.trim()){ t.focus(); return; }
+  btn.disabled = true;
+  try{
+    const r = await fetch(API, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({text:t.value.trim(), content:t.value.trim()})});
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    t.value=''; load(true);
+  }catch(e){ alert('add failed: '+e.message); } finally{ btn.disabled = false; }
+};
+load(); setInterval(()=>load(true), 8000);
+</script>
+</body></html>

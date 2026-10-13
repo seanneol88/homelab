@@ -87,6 +87,22 @@ mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write(indexHTML)
 })
+	mux.HandleFunc("DELETE /api/notes/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		res, err := db.Exec("DELETE FROM notes WHERE id=$1", id)
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		n, _ := res.RowsAffected()
+		if n == 0 {
+			http.Error(w, `{"error":"no such id"}`, 404)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"deleted"}`))
+	})
+
 
 	log.Println("go-app listening on :8080")
 	log.Fatal(http.ListenAndServe(":8080", mux))
