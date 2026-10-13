@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
-app = FastAPI(title="homelab-api", version="0.2.0")
+app = FastAPI(title="homelab-api", version="0.2.1")
 
 
 @app.get("/healthz")
@@ -79,6 +79,7 @@ main{max-width:860px;margin:0 auto;padding:48px 20px 80px}
 h1{font-size:22px;letter-spacing:.4px;display:flex;align-items:center;gap:10px}
 .pill{background:#12331f;color:#3fb950;border-radius:999px;padding:2px 10px;font-size:13px;font-weight:600}
 .sub{color:#7d8590;font-size:13px;margin:6px 0 26px}
+.section{color:#7d8590;font-size:12px;letter-spacing:.18em;text-transform:uppercase;margin:34px 4px 4px}
 .card{background:#0d1117;border:1px solid #21262d;border-radius:14px;padding:22px;margin-top:14px}
 .tz{color:#7d8590;font-size:12px;letter-spacing:.18em;text-transform:uppercase}
 .big{font-size:34px;font-weight:700;margin:4px 0 2px;font-variant-numeric:tabular-nums}
@@ -90,14 +91,16 @@ h1{font-size:22px;letter-spacing:.4px;display:flex;align-items:center;gap:10px}
 .bar>i{display:block;height:100%;background:#238636;transition:width .4s,background .4s}
 .chips{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
 .chip{background:#0b0f14;border:1px solid #21262d;border-radius:999px;padding:3px 12px;font-size:12px;color:#7d8590}
-.door{display:flex;gap:14px;align-items:baseline;background:#0d1117;border:1px solid #21262d;border-radius:12px;padding:12px 14px;margin-top:10px}
-.door code{color:#58a6ff;font-size:13px;min-width:150px}
-.door span{color:#7d8590;font-size:13px}
-.door a{color:#58a6ff;font-size:13px;text-decoration:none}
+.door{display:flex;gap:16px;align-items:center;background:#0d1117;border:1px solid #21262d;border-radius:12px;padding:14px 16px;margin-top:10px;transition:border-color .12s}
+.door:hover{border-color:#30363d}
+.door code{color:#d2a8ff;font-size:13px;min-width:120px;flex:none}
+.door .what{color:#e6edf3;font-size:13px;flex:1}
+.door a{color:#58a6ff;font-size:13px;text-decoration:none;flex:none}
+.door a:hover{text-decoration:underline}
 a.status{font-size:13px;color:#58a6ff;text-decoration:none}
 </style></head>
 <body><main>
-  <h1>🐍 seanneol api <span class="pill" id="doors">4 doors</span><span style="flex:1"></span>
+  <h1>🐍 seanneol api <span class="pill">4 doors</span><span style="flex:1"></span>
     <a class="status" href="https://uptime.seanneol.com" target="_blank">status ↗</a></h1>
   <div class="sub">FastAPI in a container on my own Proxmox box · pure Python, same soil</div>
   <div class="card">
@@ -115,11 +118,12 @@ a.status{font-size:13px;color:#58a6ff;text-decoration:none}
     <div class="bar" id="disk"><i></i></div>
     <div class="chips" id="loadchips"></div>
   </div>
-  <div class="door"><code>GET /</code><span>this face</span></div>
-  <div class="door"><code>GET /api/time</code><span>KL time as JSON — the clock is reading it</span></div>
-  <div class="door"><code>GET /api/vitals</code><span>uptime / load / memory / disk as JSON — the card above pulses with it</span><a href="/api/vitals" target="_blank" style="margin-left:auto">open ↗</a></div>
-  <div class="door"><code>GET /api/status</code><span>service heartbeat as JSON</span><a href="/api/status" target="_blank" style="margin-left:auto">open ↗</a></div>
-  <div class="door"><code>GET /docs</code><span>interactive explorer (FastAPI's free gift)</span><a href="/docs" target="_blank" style="margin-left:auto">open ↗</a></div>
+  <div class="section">doors</div>
+  <div class="door"><code>GET /docs</code><span class="what">try every endpoint in the browser — no curl needed</span><a href="/docs" target="_blank">open ↗</a></div>
+  <div class="door"><code>GET /api/vitals</code><span class="what">the pulse JSON that feeds the vitals card</span><a href="/api/vitals" target="_blank">open ↗</a></div>
+  <div class="door"><code>GET /api/status</code><span class="what">one-line service heartbeat</span><a href="/api/status" target="_blank">open ↗</a></div>
+  <div class="door"><code>GET /api/time</code><span class="what">KL time as JSON — the clock's source</span><a href="/api/time" target="_blank">open ↗</a></div>
+  <div class="door"><code>GET /</code><span class="what">this page</span><a href="/" target="_blank">open ↗</a></div>
 </main>
 <script>
 const TF = new Intl.DateTimeFormat('en-MY',{timeZone:'Asia/Kuala_Lumpur',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true});
