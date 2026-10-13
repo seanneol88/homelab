@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>seanneol · Notes</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;font:15px/1.55 -apple-system,"Segoe UI",Roboto,Arial,sans-serif;background:#0b0f14;color:#e6edf3}
+.wrap{max-width:720px;margin:0 auto;padding:28px 18px 60px}
+h1{font-size:22px;margin:0}
+.sub{color:#7d8ba0;font-size:13px;margin:4px 0 18px}
+.card{background:#10151d;border:1px solid #1e2633;border-radius:14px;padding:16px 18px;margin:12px 0}
+.row{display:flex;gap:10px}
+textarea{flex:1;resize:vertical;min-height:44px;background:#0d1220;border:1px solid #263040;color:#e6edf3;
+  border-radius:10px;padding:10px 12px;font:inherit}
+button{background:#1f7a4d;border:0;color:#fff;font-weight:600;border-radius:10px;padding:10px 16px;cursor:pointer}
+button:hover{background:#218a58}
+.note{display:flex;gap:12px;align-items:flex-start}
+.note .id{color:#4d637d;font:12px ui-monospace,Menlo,monospace;padding-top:3px}
+.note .txt{flex:1;white-space:pre-wrap;word-break:break-word}
+.note .ts{color:#7d8ba0;font-size:12px;white-space:nowrap}
+.err{background:#3a1519;border:1px solid #6b2b32;color:#ffb4ab;border-radius:10px;padding:10px 12px;margin:12px 0;display:none}
+.headrow{display:flex;align-items:center;gap:12px}
+.headcount{background:#122b1e;color:#9be3b1;border-radius:20px;padding:2px 12px;font-size:13px;font-weight:600}
+.toplink{color:#9be3b1;text-decoration:none;font-size:13px;margin-left:auto}
+</style></head>
+<body><div class="wrap">
+
+<div class="headrow">
+  <h1>📓 seanneol notes</h1>
+  <span class="headcount" id="count">…</span>
+  <a class="toplink" href="https://status.seanneol.com/status">status ↗</a>
+</div>
+<p class="sub">Go API + Postgres on my own Proxmox box · served by the same binary</p>
+
+<div class="err" id="err"></div>
+
+<div class="card row">
+  <textarea id="box" placeholder="write a note…" rows="2"></textarea>
+  <button id="btn" onclick="addNote()">Add</button>
+</div>
+
+<div id="list"></div>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+function fmt(t){ const d=new Date(t); return isNaN(d)? t :
+  new Intl.DateTimeFormat('en-MY',{dateStyle:'medium',timeStyle:'short',timeZone:'Asia/Kuala_Lumpur'}).format(d); }
+function err(m){ $('err').textContent=m; $('err').style.display=m?'block':'none'; }
+async function load(){
+  try{
+    const r = await fetch('/api/notes'); if(!r.ok) throw 'GET /api/notes: '+r.status;
+    const data = await r.json();
+    $('count').textContent = data.length;
+    $('list').innerHTML = data.map(n=>{
+      const id  = n.id ?? n.ID;
+      const txt = n.text ?? n.Text ?? n.content ?? n.Content ?? '';
+      const ts  = n.created_at ?? n.CreatedAt ?? n.createdAt ?? '';
+      return `<div class="card note"><div class="id">#${id}</div><div class="txt">${txt}</div><div class="ts">${fmt(ts)}</div></div>`;
+    }).join('');
+    err('');
+  }catch(e){ err('⚠️ '+e); }
+}
+async function addNote(){
+  const v = $('box').value.trim(); if(!v) return;
+  const r = await fetch('/api/notes',{method:'POST',headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({text:v, content:v})}); /* dual-key: server ignores whichever it doesn't read */
+  if(!r.ok){ err('POST failed: '+r.status); return; }
+  $('box').value=''; load();
+}
+$('box').addEventListener('keydown', e=>{ if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)) addNote(); });
+load(); setInterval(load, 8000);
+</script></body></html>

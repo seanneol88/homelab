@@ -1,6 +1,7 @@
 package main
 
 import (
+        _ "embed"
 	"database/sql"
 	"encoding/json"
 	"log"
@@ -16,6 +17,8 @@ type Note struct {
 	Text      string    `json:"text"`
 	CreatedAt time.Time `json:"created_at"`
 }
+//go:embed static/index.html
+var indexHTML []byte 
 
 func main() {
 	dbURL := os.Getenv("DATABASE_URL")
@@ -79,6 +82,11 @@ func main() {
 		w.WriteHeader(201)
 		w.Write([]byte(`{"status":"created"}`))
 	})
+
+mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write(indexHTML)
+})
 
 	log.Println("go-app listening on :8080")
 	log.Fatal(http.ListenAndServe(":8080", mux))
