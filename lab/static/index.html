@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>seanneol · Lab</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;font:15px/1.55 -apple-system,"Segoe UI",Roboto,Arial,sans-serif;background:#0b0f14;color:#e6edf3}
+main{max-width:1100px;margin:0 auto;padding:40px 20px 80px}
+h1{font-size:22px;display:flex;align-items:center;gap:10px;letter-spacing:.4px}
+.pill{background:#12331f;color:#3fb950;border-radius:999px;padding:2px 10px;font-size:13px;font-weight:600}
+.sub{color:#7d8590;font-size:13px;margin:6px 0 26px}
+.grid{display:flex;gap:14px;flex-wrap:wrap;align-items:stretch}
+.card{background:#0d1117;border:1px solid #21262d;border-radius:14px;padding:18px;flex:1;min-width:320px}
+.card h2{font-size:14px;margin:0 0 14px;color:#7d8590;letter-spacing:.18em;text-transform:uppercase;font-weight:600}
+select,input[type=file],input[type=number]{background:#0b0f14;border:1px solid #21262d;border-radius:8px;color:#e6edf3;padding:8px 10px;font:inherit;width:100%}
+.row{display:flex;gap:10px;margin-top:10px}
+.row>*{flex:1}
+button{border:0;border-radius:10px;background:#238636;color:#fff;padding:10px 20px;font-weight:600;cursor:pointer;transition:.15s;font:inherit}
+button:hover{background:#2ea043}
+button:disabled{opacity:.5;cursor:wait}
+.stat{color:#7d8590;font-size:12px;margin-top:12px;min-height:18px}
+#chat-log{display:flex;flex-direction:column;gap:8px;height:340px;overflow-y:auto;background:#0b0f14;border:1px solid #21262d;border-radius:10px;padding:12px}
+.msg{max-width:82%;padding:9px 12px;border-radius:12px;font-size:14px;white-space:pre-wrap;word-break:break-word}
+.msg.user{align-self:flex-end;background:#1f2a3d;border:1px solid #30363d}
+.msg.ai{align-self:flex-start;background:#14201c;border:1px solid #21262d}
+.msg.err{align-self:flex-start;background:#2a1618;border:1px solid #f8514933;color:#f8a5a5}
+textarea{flex:1;background:#0b0f14;border:1px solid #21262d;border-radius:10px;color:#e6edf3;padding:10px 12px;min-height:44px;max-height:120px;resize:vertical;font:inherit}
+textarea:focus,select:focus{outline:none;border-color:#58a6ff66}
+a.status{font-size:13px;color:#58a6ff;text-decoration:none}
+</style></head>
+<body><main>
+<h1>🧪 seanneol lab <span class="pill">2 engines</span><span style="flex:1"></span>
+  <a class="status" href="https://uptime.seanneol.com" target="_blank">status ↗</a></h1>
+<div class="sub">file converter + pocket AI · one Go binary · same Proxmox soil</div>
+<div class="grid">
+  <div class="card">
+    <h2>⚙️ converter</h2>
+    <input type="file" id="file">
+    <div class="row">
+      <select id="mode">
+        <option value="img2png">image → PNG</option>
+        <option value="img2jpg">image → JPG</option>
+        <option value="img2gif">image → GIF</option>
+        <option value="resize">image → resize (keep format)</option>
+        <option value="base64-enc">text → base64</option>
+        <option value="base64-dec">base64 → text</option>
+        <option value="csv2json">CSV → JSON</option>
+        <option value="json2csv">JSON → CSV</option>
+        <option value="json-pretty">json → pretty</option>
+        <option value="json-minify">json → minify</option>
+        <option value="md2html">markdown → html</option>
+      </select>
+      <input type="number" id="width" value="800" min="16" max="8000" title="width for image resize (px)">
+    </div>
+    <div class="row">
+      <button id="go" type="button">Convert ⬇</button>
+    </div>
+    <div class="stat" id="cstat">32MB cap · png/jpg/gif decode · downloads auto</div>
+  </div>
+  <div class="card">
+    <h2>🤖 pocket AI</h2>
+    <div id="chat-log"></div>
+    <div class="row" style="margin-top:10px">
+      <textarea id="q" placeholder="ask anything… (Enter = send, Shift+Enter = newline)"></textarea>
+      <button id="send" type="button" style="align-self:flex-end">Send</button>
+    </div>
+    <div class="stat" id="astat">brain: cloudflare workers ai · llama-3.1-8b · history kept locally in your browser</div>
+  </div>
+</div>
+</main>
+<script>
+const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+const fileIn = document.getElementById('file'), modeIn = document.getElementById('mode'),
+      widthIn = document.getElementById('width'), cstat = document.getElementById('cstat');
+modeIn.onchange = () => {
+  const img = modeIn.value.startsWith('img') || modeIn.value === 'resize';
+  widthIn.disabled = !img;
+  widthIn.style.opacity = img ? '1' : '.4';
+};
+modeIn.onchange();
+document.getElementById('go').onclick = async () => {
+  const stat = cstat;
+  if(!fileIn.files.length){ stat.textContent = '⚠ pick a file first'; return; }
+  stat.textContent = 'converting…';
+  try{
+    const fd = new FormData();
+    fd.append('file', fileIn.files[0]);
+    fd.append('mode', modeIn.value);
+    fd.append('width', widthIn.value);
+    const r = await fetch('/api/convert', {method:'POST', body:fd});
+    if(!r.ok){
+      let msg = 'HTTP ' + r.status;
+      try{ msg = (await r.json()).error || msg; }catch(e){}
+      throw new Error(msg);
+    }
+    const blob = await r.blob();
+    const cd = r.headers.get('Content-Disposition') || '';
+    const m = cd.match(/filename="([^"]+)"/);
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = m ? m[1] : 'converted.bin';
+    a.click();
+    URL.revokeObjectURL(a.href);
+    stat.textContent = '✅ downloaded ' + a.download + ' (' + blob.size + ' bytes)';
+  }catch(e){ stat.textContent = '❌ ' + e.message; }
+};
+
+const log = document.getElementById('chat-log');
+const q = document.getElementById('q');
+const sendBtn = document.getElementById('send');
+let hist = JSON.parse(localStorage.getItem('lab-chat') || '[]');
+function paint(){ log.innerHTML = hist.map(m =>
+  `<div class="msg ${m.role === 'user' ? 'user' : 'ai'}">${esc(m.content)}</div>`).join('');
+  log.scrollTop = log.scrollHeight; }
+function save(){ localStorage.setItem('lab-chat', JSON.stringify(hist.slice(-12))); }
+async function send(){
+  const text = q.value.trim();
+  if(!text) return;
+  sendBtn.disabled = true;
+  hist.push({role:'user', content:text}); q.value=''; paint(); save();
+  const think = document.createElement('div');
+  think.className = 'msg ai'; think.textContent = '…thinking…'; log.appendChild(think);
+  log.scrollTop = log.scrollHeight;
+  try{
+    const r = await fetch('/api/chat', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({message:text, history: hist.filter(m=>m.role!=='system').slice(-10)})});
+    const j = await r.json();
+    if(!r.ok) throw new Error(j.error || 'HTTP '+r.status);
+    hist.push({role:'assistant', content:j.reply});
+    think.remove(); paint(); save();
+  }catch(e){
+    think.remove();
+    const d = document.createElement('div');
+    d.className = 'msg err'; d.textContent = '❌ ' + e.message; log.appendChild(d);
+    log.scrollTop = log.scrollHeight;
+  }finally{ sendBtn.disabled = false; q.focus(); }
+}
+sendBtn.onclick = send;
+q.addEventListener('keydown', e => { if(e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); send(); } });
+paint();
+</script>
+</body></html>
