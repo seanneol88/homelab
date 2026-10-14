@@ -50,8 +50,8 @@ async function load(silent){
     const notes = await r.json();
     document.getElementById('count').textContent = Array.isArray(notes) ? notes.length : ' ? ';
     if(!notes.length){ body.innerHTML = '<div class="empty">no notes yet — write the first one ✍️</div>'; return; }
-    body.innerHTML = notes.map(n =>
-      `<div class="note"><span class="num">#${n.id}</span><div>${esc(String(n.text))}</div><span class="date">${fmt(n.created_at)}</span><button class="del" type="button" data-id="${n.id}" title="delete">✕</button></div>`
+    body.innerHTML = notes.map((n, i) =>
+      `<div class="note"><span class="num">#${notes.length - i}</span><div>${esc(String(n.text))}</div><span class="date">${fmt(n.created_at)}</span><button class="del" type="button" data-id="${n.id}" title="delete">✕</button></div>`
     ).join('');
   }catch(e){ if(!silent){ const p=document.getElementById('err'); p.textContent='could not load notes: '+e.message; p.style.display='block'; setTimeout(()=>p.style.display='none',5000);} }
 }
