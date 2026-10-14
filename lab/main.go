@@ -31,6 +31,226 @@ func jsonOut(w http.ResponseWriter, code int, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
+func httpPostJSON(url, auth string, extraHdr map[string]string, payload []byte, timeout int) ([]byte, int, error) {
+	req, _ := http.NewRequest("POST", url, bytes.NewReader(payload))
+	if auth != "" {
+		req.Header.Set("Authorization", auth)
+	}
+	for k, v := range extraHdr {
+		req.Header.Set(k, v)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: time.Duration(timeout) * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	return body, resp.StatusCode, nil
+}
+
+func cfRun(w http.ResponseWriter, model string, payload []byte) ([]byte, bool) {
+	accID := os.Getenv("CF_ACCOUNT_ID")
+	token := os.Getenv("CF_API_TOKEN")
+	if accID == "" || token == "" {
+		jsonOut(w, 500, map[string]string{"error": "cloudflare not wired — .env needs CF_ACCOUNT_ID + CF_API_TOKEN"})
+		return nil, false
+	}
+	url := "https://api.cloudflare.com/client/v4/accounts/" + accID + "/ai/run/" + model
+	body, code, err := httpPostJSON(url, "Bearer "+token, nil, payload, 120)
+	if err != nil {
+		jsonOut(w, 502, map[string]string{"error": "upstream unreachable: " + err.Error()})
+		return nil, false
+	}
+	if code != 200 {
+		jsonOut(w, 502, map[string]string{"error": fmt.Sprintf("cloudflare said %d: %s", code, string(body))})
+		return nil, false
+	}
+	return body, true
+}
+
+type chatMsg struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+func parseAnyReply(body []byte) string {
+	var openaiP struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(body, &openaiP); err == nil && len(openaiP.Choices) > 0 && openaiP.Choices[0].Message.Content != "" {
+		return openaiP.Choices[0].Message.Content
+	}
+	var anthP struct {
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(body, &anthP); err == nil && len(anthP.Content) > 0 && anthP.Content[0].Text != "" {
+		return anthP.Content[0].Text
+	}
+	var cfP struct {
+		Result struct {
+			Response string `json:"response"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(body, &cfP); err == nil && cfP.Result.Response != "" {
+		return cfP.Result.Response
+	}
+	return ""
+}
+
+func chatHandler(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Message string    `json:"message"`
+		History []chatMsg `json:"history"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || strings.TrimSpace(in.Message) == "" {
+		jsonOut(w, 400, map[string]string{"error": `need {"message":"..."}`})
+		return
+	}
+	msgs := append([]chatMsg{{"system", "You are a concise, friendly assistant inside seanneol's homelab lab page."}}, in.History...)
+	msgs = append(msgs, chatMsg{"user", in.Message})
+
+	provider := strings.ToLower(strings.TrimSpace(os.Getenv("CHAT_PROVIDER")))
+	if provider == "" {
+		provider = "arena"
+	}
+	var body []byte
+	var code int
+	var err error
+
+	switch provider {
+	case "groq":
+		key := os.Getenv("GROQ_API_KEY")
+		if key == "" {
+			jsonOut(w, 500, map[string]string{"error": "groq not wired — .env needs GROQ_API_KEY"})
+			return
+		}
+		model := os.Getenv("CHAT_MODEL")
+		if model == "" {
+			model = "llama-3.3-70b-versatile"
+		}
+		payload, _ := json.Marshal(map[string]any{"model": model, "messages": msgs})
+		body, code, err = httpPostJSON("https://api.groq.com/openai/v1/chat/completions", "Bearer "+key, nil, payload, 90)
+	case "arena", "arena-anthropic":
+		key := os.Getenv("ARENA_API_KEY")
+		if key == "" {
+			jsonOut(w, 500, map[string]string{"error": "arena not wired — .env needs ARENA_API_KEY"})
+			return
+		}
+		base := os.Getenv("ARENA_BASE_URL")
+		if base == "" {
+			base = "https://api.preview.arena.ai"
+		}
+		base = strings.TrimRight(base, "/")
+		model := os.Getenv("CHAT_MODEL")
+		if model == "" {
+			model = "coding-router-preview"
+		}
+		if provider == "arena-anthropic" {
+			url := base + "/v1/messages"
+			payload, _ := json.Marshal(map[string]any{
+				"model":      model,
+				"max_tokens": 1024,
+				"system":     msgs[0].Content,
+				"messages":   msgs[1:],
+			})
+			body, code, err = httpPostJSON(url, "", map[string]string{
+				"x-api-key":         key,
+				"anthropic-version": "2023-06-01",
+			}, payload, 90)
+		} else {
+			url := base + "/v1/chat/completions"
+			payload, _ := json.Marshal(map[string]any{"model": model, "messages": msgs})
+			body, code, err = httpPostJSON(url, "Bearer "+key, nil, payload, 90)
+		}
+	case "cloudflare", "cf", "workersai":
+		payload, _ := json.Marshal(map[string]any{"messages": msgs})
+		var ok bool
+		body, ok = cfRun(w, "@cf/meta/llama-3.1-8b-instruct", payload)
+		if !ok {
+			return
+		}
+		code = 200
+	default:
+		jsonOut(w, 400, map[string]string{"error": "unknown CHAT_PROVIDER: " + provider})
+		return
+	}
+
+	if err != nil {
+		jsonOut(w, 502, map[string]string{"error": "upstream unreachable: " + err.Error()})
+		return
+	}
+	if code != 200 {
+		jsonOut(w, 502, map[string]string{"error": fmt.Sprintf("%s brain said %d: %s", provider, code, string(body))})
+		return
+	}
+	if reply := parseAnyReply(body); reply != "" {
+		jsonOut(w, 200, map[string]string{"reply": reply, "provider": provider})
+		return
+	}
+	jsonOut(w, 502, map[string]string{"error": "unparseable brain answer: " + string(body)})
+}
+
+func imagineHandler(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Prompt string `json:"prompt"`
+		Width  int    `json:"width"`
+		Height int    `json:"height"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || strings.TrimSpace(in.Prompt) == "" {
+		jsonOut(w, 400, map[string]string{"error": `need {"prompt":"..."}`})
+		return
+	}
+	if in.Width == 0 || in.Height == 0 {
+		in.Width, in.Height = 1024, 1024
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"prompt": in.Prompt, "steps": 4,
+	})
+	body, ok := cfRun(w, "@cf/black-forest-labs/flux-1-schnell", payload)
+	if !ok {
+		return
+	}
+	var final []byte
+	if len(body) > 0 && body[0] == '{' {
+		var p struct {
+			Result json.RawMessage `json:"result"`
+		}
+		json.Unmarshal(body, &p)
+		var imgs struct {
+			Image string `json:"image"`
+		}
+		if err := json.Unmarshal(p.Result, &imgs); err != nil || imgs.Image == "" {
+			jsonOut(w, 502, map[string]string{"error": "unparseable imagine answer: " + string(body)})
+			return
+		}
+		s := imgs.Image
+		if strings.HasPrefix(s, "data:") {
+			if i := strings.Index(s, ","); i >= 0 {
+				s = s[i+1:]
+			}
+		}
+		b, err := base64.StdEncoding.DecodeString(s)
+		if err != nil {
+			jsonOut(w, 502, map[string]string{"error": "bad base64 from brain: " + err.Error()})
+			return
+		}
+		final = b
+	} else {
+		final = body
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Content-Disposition", `attachment; filename="imagine.png"`)
+	w.Write(final)
+}
+
 func resizeNN(img image.Image, w int) image.Image {
 	b := img.Bounds()
 	ow, oh := b.Dx(), b.Dy()
@@ -68,6 +288,98 @@ func imgConvert(data []byte, format string, width int) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+func convertHandler(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 32<<20)
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		jsonOut(w, 400, map[string]string{"error": "bad upload: " + err.Error()})
+		return
+	}
+	f, hdr, err := r.FormFile("file")
+	if err != nil {
+		jsonOut(w, 400, map[string]string{"error": "no file in field 'file'"})
+		return
+	}
+	defer f.Close()
+	data, err := io.ReadAll(f)
+	if err != nil {
+		jsonOut(w, 500, map[string]string{"error": err.Error()})
+		return
+	}
+	mode := r.FormValue("mode")
+	width, _ := strconv.Atoi(r.FormValue("width"))
+	base := strings.TrimSuffix(hdr.Filename, path.Ext(hdr.Filename))
+	if base == "" {
+		base = "converted"
+	}
+	var out []byte
+	ext := "bin"
+	ctype := "application/octet-stream"
+	switch mode {
+	case "img2png", "img2jpg", "img2gif":
+		format := strings.TrimPrefix(mode, "img2")
+		out, err = imgConvert(data, format, width)
+		ext = format
+		ctype = "image/" + format
+	case "resize":
+		format := "png"
+		lower := strings.ToLower(hdr.Filename)
+		switch {
+		case strings.HasSuffix(lower, ".png"):
+			format = "png"
+		case strings.HasSuffix(lower, ".jpg"), strings.HasSuffix(lower, ".jpeg"):
+			format = "jpg"
+		case strings.HasSuffix(lower, ".gif"):
+			format = "gif"
+		}
+		out, err = imgConvert(data, format, width)
+		ext = format
+		ctype = "image/" + format
+	case "base64-enc":
+		out = []byte(base64.StdEncoding.EncodeToString(data))
+		ext, ctype = "txt", "text/plain"
+	case "base64-dec":
+		var buf []byte
+		buf, err = base64.StdEncoding.DecodeString(strings.TrimSpace(string(data)))
+		out = buf
+		ext, ctype = "txt", "application/octet-stream"
+	case "csv2json":
+		out, err = csv2json(data)
+		ext, ctype = "json", "application/json"
+	case "json2csv":
+		out, err = json2csv(data)
+		ext, ctype = "csv", "text/csv"
+	case "md2html":
+		out = md2html(data)
+		ext, ctype = "html", "text/html"
+	case "json-pretty":
+		var v any
+		if err = json.Unmarshal(data, &v); err == nil {
+			buf := new(bytes.Buffer)
+			en := json.NewEncoder(buf)
+			en.SetIndent("", "  ")
+			err = en.Encode(v)
+			out = buf.Bytes()
+		}
+		ext, ctype = "json", "application/json"
+	case "json-minify":
+		var v any
+		if err = json.Unmarshal(data, &v); err == nil {
+			out, err = json.Marshal(v)
+		}
+		ext, ctype = "json", "application/json"
+	default:
+		jsonOut(w, 400, map[string]string{"error": "unknown mode: " + mode})
+		return
+	}
+	if err != nil {
+		jsonOut(w, 422, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", ctype)
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.%s"`, base, ext))
+	w.Write(out)
 }
 
 func csv2json(data []byte) ([]byte, error) {
@@ -187,149 +499,6 @@ func md2html(data []byte) []byte {
 	return []byte(out.String())
 }
 
-func convertHandler(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, 32<<20)
-	if err := r.ParseMultipartForm(32 << 20); err != nil {
-		jsonOut(w, 400, map[string]string{"error": "bad upload: " + err.Error()})
-		return
-	}
-	f, hdr, err := r.FormFile("file")
-	if err != nil {
-		jsonOut(w, 400, map[string]string{"error": "no file in field 'file'"})
-		return
-	}
-	defer f.Close()
-	data, err := io.ReadAll(f)
-	if err != nil {
-		jsonOut(w, 500, map[string]string{"error": err.Error()})
-		return
-	}
-	mode := r.FormValue("mode")
-	width, _ := strconv.Atoi(r.FormValue("width"))
-	base := strings.TrimSuffix(hdr.Filename, path.Ext(hdr.Filename))
-	if base == "" {
-		base = "converted"
-	}
-	var out []byte
-	ext := "bin"
-	ctype := "application/octet-stream"
-	switch mode {
-	case "img2png", "img2jpg", "img2gif":
-		format := strings.TrimPrefix(mode, "img2")
-		out, err = imgConvert(data, format, width)
-		ext = format
-		ctype = "image/" + format
-	case "resize":
-		format := "png"
-		lower := strings.ToLower(hdr.Filename)
-		switch {
-		case strings.HasSuffix(lower, ".png"):
-			format = "png"
-		case strings.HasSuffix(lower, ".jpg"), strings.HasSuffix(lower, ".jpeg"):
-			format = "jpg"
-		case strings.HasSuffix(lower, ".gif"):
-			format = "gif"
-		}
-		out, err = imgConvert(data, format, width)
-		ext = format
-		ctype = "image/" + format
-	case "base64-enc":
-		out = []byte(base64.StdEncoding.EncodeToString(data))
-		ext, ctype = "txt", "text/plain"
-	case "base64-dec":
-		var buf []byte
-		buf, err = base64.StdEncoding.DecodeString(strings.TrimSpace(string(data)))
-		out = buf
-		ext, ctype = "txt", "application/octet-stream"
-	case "csv2json":
-		out, err = csv2json(data)
-		ext, ctype = "json", "application/json"
-	case "json2csv":
-		out, err = json2csv(data)
-		ext, ctype = "csv", "text/csv"
-	case "md2html":
-		out = md2html(data)
-		ext, ctype = "html", "text/html"
-	case "json-pretty":
-		var v any
-		if err = json.Unmarshal(data, &v); err == nil {
-			buf := new(bytes.Buffer)
-			en := json.NewEncoder(buf)
-			en.SetIndent("", "  ")
-			err = en.Encode(v)
-			out = buf.Bytes()
-		}
-		ext, ctype = "json", "application/json"
-	case "json-minify":
-		var v any
-		if err = json.Unmarshal(data, &v); err == nil {
-			out, err = json.Marshal(v)
-		}
-		ext, ctype = "json", "application/json"
-	default:
-		jsonOut(w, 400, map[string]string{"error": "unknown mode: " + mode})
-		return
-	}
-	if err != nil {
-		jsonOut(w, 422, map[string]string{"error": err.Error()})
-		return
-	}
-	w.Header().Set("Content-Type", ctype)
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.%s"`, base, ext))
-	w.Write(out)
-}
-
-type chatMsg struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-
-func chatHandler(w http.ResponseWriter, r *http.Request) {
-	accID := os.Getenv("CF_ACCOUNT_ID")
-	token := os.Getenv("CF_API_TOKEN")
-	if accID == "" || token == "" {
-		jsonOut(w, 500, map[string]string{"error": "brain not wired yet — .env needs CF_ACCOUNT_ID + CF_API_TOKEN (Phase 2!)"})
-		return
-	}
-	var in struct {
-		Message string    `json:"message"`
-		History []chatMsg `json:"history"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || strings.TrimSpace(in.Message) == "" {
-		jsonOut(w, 400, map[string]string{"error": `need {"message":"..."}`})
-		return
-	}
-	msgs := append([]chatMsg{{"system", "You are a concise, friendly assistant inside seanneol's homelab lab page."}}, in.History...)
-	msgs = append(msgs, chatMsg{"user", in.Message})
-	payload, _ := json.Marshal(map[string]any{"messages": msgs})
-	url := "https://api.cloudflare.com/client/v4/accounts/" + accID + "/ai/run/@cf/meta/llama-3.1-8b-instruct"
-	req, _ := http.NewRequest("POST", url, bytes.NewReader(payload))
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 60 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		jsonOut(w, 502, map[string]string{"error": "upstream unreachable: " + err.Error()})
-		return
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		jsonOut(w, 502, map[string]string{"error": fmt.Sprintf("cloudflare said %d: %s", resp.StatusCode, string(body))})
-		return
-	}
-	var parsed struct {
-		Result struct {
-			Response string `json:"response"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(body, &parsed); err != nil || parsed.Result.Response == "" {
-		jsonOut(w, 502, map[string]string{"error": "unparseable brain answer: " + string(body)})
-		return
-	}
-	jsonOut(w, 200, map[string]string{"reply": parsed.Result.Response})
-}
-
 func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -337,6 +506,7 @@ func main() {
 	})
 	mux.HandleFunc("POST /api/convert", convertHandler)
 	mux.HandleFunc("POST /api/chat", chatHandler)
+	mux.HandleFunc("POST /api/imagine", imagineHandler)
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write(indexHTML)
