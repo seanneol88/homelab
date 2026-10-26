@@ -48,27 +48,28 @@
 > One Go binary · one tunnel · three+ engines: chat brain, pixel-conjurer, doc organs.
 
 ```txt
-                    browser
-                       │
-            cloudflared (tunnel → registered lab.seanneol.com)
-                       │
-                 10.86.4.x :8097
-                       │
-             ┌─────────┴─────────┐
-             │   lab (Go 1.23)   │    :8097 local ➜ :8080 container
-             │  /api/convert     │ image → png/jpg   (stdlib)
-             │  /api/extract     │ pdf/docx/pptx/txt → text
-             │  /api/convert-doc │ pdf → .docx | .pptx | .txt
-             │  /api/chat        │ 24-msg memory, budget slider
-             │  /api/summarize   │ chunked map-reduce condense
-             │  /api/imagine     │ flux-1-schnell via CF
-             │  /healthz         │
-             └─────────┬─────────┘
-         ┌─────────────┼──────────────┐
-   Groq (gpt-oss-120b) │   Cloudflare Workers AI
-         │
-   python mini-organs inside the box:
-   pdftotext · pdf2docx · pdftoppm + python-pptx
+guest (internet)
+  │
+  ▼
+Cloudflare edge   [DNS · TLS · Turnstile gate for seanneol.com]
+  │
+  ▼
+cloudflared tunnel   hostname lab.seanneol.com
+  │
+  ▼
+VM docker-server   LAN :8097  ->  container :8080
+  │
+  └─ lab (Go 1.23, one binary) serves:
+       /api/convert       image png <-> jpg         (pure Go)
+       /api/extract       pdf|docx|pptx|txt -> text (pdftotext / zip+XML)
+       /api/convert-doc   pdf -> .docx / .pptx / .txt
+       /api/chat          groq · openai/gpt-oss-120b (24-msg memory)
+       /api/summarize     groq chunked map+reduce
+       /api/imagine       cloudflare workers ai · flux-1-schnell
+       /healthz           liveness (200/301/302 ok)
+
+brains called per request:   Groq API · Cloudflare Workers AI
+python organs in-container:  pdftotext · pdf2docx · pdftoppm + python-pptx
 ```
 
 ## Engines
@@ -103,49 +104,11 @@
 
 ## The five laws (carved on the gate)
 
-1. Paste-glue
-2. Template-faith
-3. Model-gerontology
-4. Alpine-µsl-shuns-C++-wheels
-5. Builder-TTY-swallows-compiler
-
-# 🩹 Error Handling — The Scar Archive
-
-> Every file here is an error that **really happened** on docker-server, with the
-> exact symptom, what it actually meant, the fix that worked, and the habit that
-> prevents its return. Sorted chaos into knowledge.
-
-## The Five Laws
-
-1. **Read the actual error line, not the follow-on noise.** First failure wins.
-2. **Name the layer before touching anything.** DNS → tunnel → ingress → container → app.
-3. **Fingerprint responses, don't vibes them.** Empty 404 ≠ 22-byte JSON 404 ≠ 000.
-4. **Idempotent fixes re-apply safely.** Destructive commands run once, after `ls`.
-5. **Green first, champagne after.** Gates are the contract; commit is the signature.
-
-## Quick-lookup index
-
-| You see… | Open |
-|---|---|
-| `code: 1003` on `route dns` | `01-error-1003-record-exists.md` |
-| Browser `HTTP ERROR 404`, empty page, tunnel "up" | `02-empty-404-catchall.md` |
-| `DNS_PROBE_POSSIBLE` | `03-dns-probe-possible.md` |
-| psql socket `No such file or directory` | `04-container-up-not-ready.md` |
-| `[42P01] relation does not exist` | `05-error-42p01-relation-missing.md` |
-| `requires go >= 1.xx` | `06-toolchain-version-conflict.md` |
-| folder where a file should be | `07-mkdir-vs-file.md` |
-| `no configuration file provided` | `08-build-without-files.md` |
-| bash mangled by `<` `>` pipes | `09-placeholder-redirection.md` |
-| scary-but-calm lines | `10-benign-messages.md` |
-| dashboard frozen while app alive | `11-inc-001-dashboard-freeze.md` |
-| ECONNREFUSED from sibling container | `12-econnrefused-bridge-vs-loopback.md` |
-| `not a valid identifier` on .env | `13-env-file-mangled.md` |
-| 404/403 with `…` in URL | `14-ellipsis-copy-trap.md` |
-| scheduled job silent | `15-timer-never-armed-enable-now.md` |
-| cloudflareaccess 302 on public path | `16-allow-vs-bypass-access-policy.md` |
-| literal `<div…>` as text | `17-escape-data-never-skeleton.md` |
-| 200 with empty body / embed not found | `18-ghost-200-empty-embed.md` |
-
+1. **Paste-glue** — multi-line `.env` can fuse; cat five lines before any `up`.
+2. **Template-faith** — `PASTE_…` skeletons become REAL VALUES if swallowed.
+3. **Model-gerontology** — catalogs churn; `/v1/models` is the only oracle.
+4. **Alpine-µsl-shuns-C++-wheels** — pip+u slc natives → glibc runtime (`python:3.12-slim-bookworm`).
+5. **Builder-TTY-swallows-compiler** — blind "failed to solve" → `--progress=plain`/compile outside.
 
 # 🌳 Homelab Skill Tree — As-Built Record
 
