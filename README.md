@@ -1,4 +1,4 @@
-# 🏰 seanneol fortress library
+# 🏰 Seanneol fortress library
 
 > One workspace, four archives, one codex — everything the homelab taught us, in verse and fact.
 > _"Verify the artifact, never the memory."_
