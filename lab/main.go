@@ -1,23 +1,23 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
+	"context"
 	_ "embed"
-	"encoding/base64"
-	"encoding/csv"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"image"
-	"image/gif"
+	_ "image/gif"
 	"image/jpeg"
 	"image/png"
 	"io"
 	"log"
 	"net/http"
 	"os"
-	"path"
-	"sort"
-	"strconv"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -25,492 +25,704 @@ import (
 //go:embed static/index.html
 var indexHTML []byte
 
-func jsonOut(w http.ResponseWriter, code int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(v)
-}
+//go:embed static/hobby.html
+var hobbyHTML []byte
+const chatSystem = "You are a helpful assistant living on seanneol lab (lab.seanneol.com), a homelab showcase. Be concise, friendly, and honest. Never claim to have abilities you do not have."
+const summarizeSystem = "You are a precise document summarizer. Output: 1) a 2-3 sentence TL;DR, 2) bullet key points, 3) notable entities/figures if any. Be faithful to the source; do not invent facts. If the excerpt is cut mid-phrase, ignore the fragment."
 
-func httpPostJSON(url, auth string, extraHdr map[string]string, payload []byte, timeout int) ([]byte, int, error) {
-	req, _ := http.NewRequest("POST", url, bytes.NewReader(payload))
-	if auth != "" {
-		req.Header.Set("Authorization", auth)
-	}
-	for k, v := range extraHdr {
-		req.Header.Set(k, v)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: time.Duration(timeout) * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	return body, resp.StatusCode, nil
+type chatReq struct {
+	Message   string      `json:"message"`
+	Model     string      `json:"model"`
+	SessionID string      `json:"sessionId"`
+	Budget    int         `json:"budget"`
+	History   []chatEntry `json:"history"`
 }
-
-func cfRun(w http.ResponseWriter, model string, payload []byte) ([]byte, bool) {
-	accID := os.Getenv("CF_ACCOUNT_ID")
-	token := os.Getenv("CF_API_TOKEN")
-	if accID == "" || token == "" {
-		jsonOut(w, 500, map[string]string{"error": "cloudflare not wired — .env needs CF_ACCOUNT_ID + CF_API_TOKEN"})
-		return nil, false
-	}
-	url := "https://api.cloudflare.com/client/v4/accounts/" + accID + "/ai/run/" + model
-	body, code, err := httpPostJSON(url, "Bearer "+token, nil, payload, 120)
-	if err != nil {
-		jsonOut(w, 502, map[string]string{"error": "upstream unreachable: " + err.Error()})
-		return nil, false
-	}
-	if code != 200 {
-		jsonOut(w, 502, map[string]string{"error": fmt.Sprintf("cloudflare said %d: %s", code, string(body))})
-		return nil, false
-	}
-	return body, true
-}
-
-type chatMsg struct {
+type chatEntry struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
 }
+type chatResp struct {
+	Reply    string `json:"reply"`
+	Provider string `json:"provider"`
+}
 
-func parseAnyReply(body []byte) string {
-	var openaiP struct {
+type summarizeReq struct {
+	Text string `json:"text"`
+}
+type summarizeResp struct {
+	Summary  string `json:"summary"`
+	Chunks   int    `json:"chunks"`
+	Provider string `json:"provider"`
+	Chars    int    `json:"chars"`
+}
+
+// ---------------- doc text extraction ----------------
+
+func extractText(name string, data []byte) (string, error) {
+	ext := strings.ToLower(filepath.Ext(name))
+	switch ext {
+	case ".txt", ".md", ".csv", ".log", ".json":
+		return string(data), nil
+	case ".docx":
+		return ooxmlText(data, func(s string) bool { return s == "word/document.xml" })
+	case ".pptx":
+		return ooxmlText(data, func(s string) bool {
+			return strings.HasPrefix(s, "ppt/slides/slide") && strings.HasSuffix(s, ".xml")
+		})
+	case ".pdf":
+		return pdfText(data)
+	default:
+		return "", fmt.Errorf("unsupported document type %q (accept: pdf, docx, pptx, txt, md, csv, log, json)", ext)
+	}
+}
+
+// DOCX/PPTX: unzip, filter members, strip XML tags, join the character data.
+func ooxmlText(data []byte, keep func(string) bool) (string, error) {
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return "", fmt.Errorf("not a valid OOXML zip: %v", err)
+	}
+	var b strings.Builder
+	for _, f := range zr.File {
+		if !keep(f.Name) {
+			continue
+		}
+		rc, err := f.Open()
+		if err != nil {
+			continue
+		}
+		raw, _ := io.ReadAll(io.LimitReader(rc, 8<<20))
+		rc.Close()
+		dec := xml.NewDecoder(bytes.NewReader(raw))
+		for {
+			tok, err := dec.Token()
+			if err != nil {
+				break
+			}
+			switch t := tok.(type) {
+			case xml.CharData:
+				b.Write(t)
+			case xml.StartElement:
+				if t.Name.Local == "br" || t.Name.Local == "p" {
+					b.WriteByte('\n')
+				}
+			}
+		}
+		b.WriteString("\n\n")
+	}
+	out := strings.TrimSpace(b.String())
+	if out == "" {
+		return "", fmt.Errorf("no text found inside document")
+	}
+	return out, nil
+}
+
+func pdfText(data []byte) (string, error) {
+	tmp, err := os.CreateTemp("", "lab-*.pdf")
+	if err != nil {
+		return "", err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return "", err
+	}
+	tmp.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "pdftotext", "-layout", tmp.Name(), "-").CombinedOutput()
+	if ctx.Err() != nil {
+		return "", fmt.Errorf("pdf extraction timed out")
+	}
+	s := strings.TrimSpace(string(out))
+	if err != nil && s == "" {
+		return "", fmt.Errorf("pdftotext failed: %v", err)
+	}
+	if s == "" {
+		return "", fmt.Errorf("pdf contained no extractable text (scanned image?)")
+	}
+	return s, nil
+}
+
+// ---------------- provider plumbing ----------------
+
+func cfURL(account, model string) string {
+	return fmt.Sprintf("https://api.cloudflare.com/client/v4/accounts/%s/ai/run/%s", account, model)
+}
+
+type cfChat struct {
+	Messages []chatEntry `json:"messages"`
+	MaxToks  int         `json:"max_tokens,omitempty"`
+}
+type cfResp struct {
+	Result struct {
+		Response string `json:"response"`
+	} `json:"result"`
+	Success bool `json:"success"`
+	Raw     json.RawMessage
+	Body    string
+}
+
+func callCloudflare(model string, e chatEntry, tok, acc string) (string, error) {
+	body, _ := json.Marshal(cfChat{Messages: []chatEntry{{Role: "system", Content: chatSystem}, e}})
+	req, _ := http.NewRequest("POST", cfURL(acc, model), bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("Content-Type", "application/json")
+	r, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
+	if err != nil {
+		return "", fmt.Errorf("cloudflare unreachable: %v", err)
+	}
+	defer r.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if r.StatusCode != 200 {
+		return "", fmt.Errorf("cloudflare said %d: %.300s", r.StatusCode, raw)
+	}
+	var c cfResp
+	if json.Unmarshal(raw, &c) != nil || c.Result.Response == "" {
+		return "", fmt.Errorf("cloudflare answered oddly: %.300s", raw)
+	}
+	return c.Result.Response, nil
+}
+
+const groqURL = "https://api.groq.com/openai/v1/chat/completions"
+
+func callGroqMessages(model, apiKey string, sys string, entries []chatEntry, budget int) (string, error) {
+	msgs := []chatEntry{{Role: "system", Content: sys}}
+	msgs = append(msgs, entries...)
+	body, _ := json.Marshal(map[string]any{
+		"model": model, "messages": msgs, "max_tokens": budget,
+	})
+	req, _ := http.NewRequest("POST", groqURL, bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	r, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
+	if err != nil {
+		return "", fmt.Errorf("groq unreachable: %v", err)
+	}
+	defer r.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if r.StatusCode != 200 {
+		return "", fmt.Errorf("groq brain said %d: %.300s", r.StatusCode, raw)
+	}
+	var out struct {
 		Choices []struct {
 			Message struct {
 				Content string `json:"content"`
 			} `json:"message"`
 		} `json:"choices"`
 	}
-	if err := json.Unmarshal(body, &openaiP); err == nil && len(openaiP.Choices) > 0 && openaiP.Choices[0].Message.Content != "" {
-		return openaiP.Choices[0].Message.Content
+	if json.Unmarshal(raw, &out) != nil || len(out.Choices) == 0 || out.Choices[0].Message.Content == "" {
+		return "", fmt.Errorf("groq answered oddly: %.300s", raw)
 	}
-	var anthP struct {
+	return out.Choices[0].Message.Content, nil
+}
+
+func callArena(prompt, sys, key string) (string, error) {
+	body, _ := json.Marshal(map[string]string{
+		"model": "claude-sonnet-4.6", "system": sys, "prompt": prompt, "pending": "false",
+	})
+	req, _ := http.NewRequest("POST", "https://api.ai.cloudflare.com/v1/chat", bytes.NewReader(body))
+	if key != "" {
+		req.Header.Set("Authorization", "ApiKey "+key)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	r, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
+	if err != nil {
+		return "", fmt.Errorf("arena unreachable: %v", err)
+	}
+	defer r.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if r.StatusCode != 200 {
+		return "", fmt.Errorf("arena said %d: %.300s", r.StatusCode, raw)
+	}
+	var a struct {
+		Reply string `json:"reply"`
+	}
+	if json.Unmarshal(raw, &a) != nil || a.Reply == "" {
+		return "", fmt.Errorf("arena answered oddly: %.300s", raw)
+	}
+	return a.Reply, nil
+}
+
+func callArenaAnthropic(prompt string, maxToks int, key string) (string, error) {
+	body := fmt.Sprintf(`{"model":"claude-sonnet-4.6","max_tokens":%d,"system":%s,"messages":[{"role":"user","content":%s}]}`,
+		maxToks, jsonString(chatSystem), jsonString(prompt))
+	req, _ := http.NewRequest("POST", "https://api.ai.cloudflare.com/v1/messages", bytes.NewReader([]byte(body)))
+	req.Header.Set("x-api-key", key)
+	req.Header.Set("anthropic-version", "2023-06-01")
+	req.Header.Set("Content-Type", "application/json")
+	r, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
+	if err != nil {
+		return "", fmt.Errorf("arena unreachable: %v", err)
+	}
+	defer r.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if r.StatusCode != 200 {
+		return "", fmt.Errorf("arena said %d: %.300s", r.StatusCode, raw)
+	}
+	var a struct {
 		Content []struct {
 			Text string `json:"text"`
 		} `json:"content"`
 	}
-	if err := json.Unmarshal(body, &anthP); err == nil && len(anthP.Content) > 0 && anthP.Content[0].Text != "" {
-		return anthP.Content[0].Text
+	if json.Unmarshal(raw, &a) != nil || len(a.Content) == 0 {
+		return "", fmt.Errorf("arena answered oddly: %.300s", raw)
 	}
-	var cfP struct {
-		Result struct {
-			Response string `json:"response"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(body, &cfP); err == nil && cfP.Result.Response != "" {
-		return cfP.Result.Response
-	}
-	return ""
+	return a.Content[0].Text, nil
 }
 
-func chatHandler(w http.ResponseWriter, r *http.Request) {
-	var in struct {
-		Message string    `json:"message"`
-		History []chatMsg `json:"history"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || strings.TrimSpace(in.Message) == "" {
-		jsonOut(w, 400, map[string]string{"error": `need {"message":"..."}`})
-		return
-	}
-	msgs := append([]chatMsg{{"system", "You are a concise, friendly assistant inside seanneol's homelab lab page."}}, in.History...)
-	msgs = append(msgs, chatMsg{"user", in.Message})
+func jsonString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
 
-	provider := strings.ToLower(strings.TrimSpace(os.Getenv("CHAT_PROVIDER")))
-	if provider == "" {
-		provider = "arena"
-	}
-	var body []byte
-	var code int
-	var err error
+// ---------------- HTTP handlers ----------------
 
-	switch provider {
-	case "groq":
+func withLimit(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, 32<<20)
+		h(w, r)
+	}
+}
+
+func chatHandler(prov, model string, budget int) http.HandlerFunc {
+	type message struct {
+		ts    time.Time
+		entry chatEntry
+	}
+	var history = map[string][]message{}
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		var in chatReq
+		if json.NewDecoder(r.Body).Decode(&in) != nil || strings.TrimSpace(in.Message) == "" {
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(map[string]string{"error": "send {\"message\":\"...\"}"})
+			return
+		}
+		sid := in.SessionID
+		if sid == "" {
+			sid = "anon"
+		}
+		now := time.Now()
+		entries := history[sid]
+		var recent []chatEntry
+		for _, m := range entries {
+			if now.Sub(m.ts) < 2*time.Hour {
+				recent = append(recent, m.entry)
+			}
+		}
+		if len(recent) > 24 {
+			recent = recent[len(recent)-24:]
+		}
+		for _, hmsg := range in.History {
+			if hmsg.Role == "user" || hmsg.Role == "assistant" {
+				if len(hmsg.Content) > 4000 {
+					hmsg.Content = hmsg.Content[:4000]
+				}
+				recent = append(recent, hmsg)
+			}
+		}
+		entry := chatEntry{Role: "user", Content: in.Message}
+		btv := budget
+		if in.Budget > 0 && in.Budget < 2000 {
+			btv = in.Budget
+		}
+
+		var reply string
+		var err error
+		var used = prov
+		switch prov {
+		case "groq":
+			key := os.Getenv("GROQ_API_KEY")
+			if key == "" {
+				reply = "my groq brain is unpowered — GROQ_API_KEY is empty in the lab's env."
+				err = nil
+				break
+			}
+			userEntries := append([]chatEntry{}, recent...)
+			userEntries = append(userEntries, entry)
+			reply, err = callGroqMessages(model, key, chatSystem, userEntries, btv)
+			used = "groq"
+		case "arena":
+			reply, err = callArena(in.Message, chatSystem, os.Getenv("ARENA_API_KEY"))
+			used = "arena /v1/chat"
+			if err != nil && os.Getenv("ARENA_API_KEY") != "" {
+				if alt, err2 := callArenaAnthropic(in.Message, btv, os.Getenv("ARENA_API_KEY")); err2 == nil {
+					reply, err, used = alt, nil, "arena /v1/messages"
+				}
+			}
+		default:
+			tok := os.Getenv("CF_API_TOKEN")
+			acc := os.Getenv("CF_ACCOUNT_ID")
+			if tok == "" || acc == "" {
+				reply = "my cloudflare brain is unplugged — CF_API_TOKEN/CF_ACCOUNT_ID are empty."
+				err = nil
+			} else {
+				reply, err = callCloudflare(model, entry, tok, acc)
+				used = "cloudflare"
+			}
+		}
+		if err != nil {
+			w.WriteHeader(502)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error(), "provider": used})
+			return
+		}
+		history[sid] = append(entries, message{now, entry}, message{now, chatEntry{Role: "assistant", Content: reply}})
+		json.NewEncoder(w).Encode(chatResp{Reply: reply, Provider: used})
+	}
+}
+
+func summarizeHandler(prov, model string, budget int) http.HandlerFunc {
+	const chunkSize = 12000
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		var in summarizeReq
+		if json.NewDecoder(r.Body).Decode(&in) != nil || strings.TrimSpace(in.Text) == "" {
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(map[string]string{"error": "send {\"text\":\"...document text...\"}"})
+			return
+		}
+		if prov != "groq" || os.Getenv("GROQ_API_KEY") == "" {
+			w.WriteHeader(503)
+			json.NewEncoder(w).Encode(map[string]string{"error": "summarizer needs CHAT_PROVIDER=groq with a key"})
+			return
+		}
 		key := os.Getenv("GROQ_API_KEY")
-		if key == "" {
-			jsonOut(w, 500, map[string]string{"error": "groq not wired — .env needs GROQ_API_KEY"})
-			return
-		}
-		model := os.Getenv("CHAT_MODEL")
-		if model == "" {
-			model = "llama-3.3-70b-versatile"
-		}
-		payload, _ := json.Marshal(map[string]any{"model": model, "messages": msgs})
-		body, code, err = httpPostJSON("https://api.groq.com/openai/v1/chat/completions", "Bearer "+key, nil, payload, 90)
-	case "arena", "arena-anthropic":
-		key := os.Getenv("ARENA_API_KEY")
-		if key == "" {
-			jsonOut(w, 500, map[string]string{"error": "arena not wired — .env needs ARENA_API_KEY"})
-			return
-		}
-		base := os.Getenv("ARENA_BASE_URL")
-		if base == "" {
-			base = "https://api.preview.arena.ai"
-		}
-		base = strings.TrimRight(base, "/")
-		model := os.Getenv("CHAT_MODEL")
-		if model == "" {
-			model = "coding-router-preview"
-		}
-		if provider == "arena-anthropic" {
-			url := base + "/v1/messages"
-			payload, _ := json.Marshal(map[string]any{
-				"model":      model,
-				"max_tokens": 1024,
-				"system":     msgs[0].Content,
-				"messages":   msgs[1:],
-			})
-			body, code, err = httpPostJSON(url, "", map[string]string{
-				"x-api-key":         key,
-				"anthropic-version": "2023-06-01",
-			}, payload, 90)
+		btv := budget
+		chunks := 1
+		var summary string
+		var err error
+		runes := []rune(in.Text)
+		if len(runes) <= chunkSize {
+			summary, err = callGroqMessages(model, key, summarizeSystem,
+				[]chatEntry{{Role: "user", Content: string(runes)}}, btv)
 		} else {
-			url := base + "/v1/chat/completions"
-			payload, _ := json.Marshal(map[string]any{"model": model, "messages": msgs})
-			body, code, err = httpPostJSON(url, "Bearer "+key, nil, payload, 90)
+			var partials []string
+			for i := 0; i < len(runes); i += chunkSize {
+				end := i + chunkSize
+				if end > len(runes) {
+					end = len(runes)
+				}
+				p, e2 := callGroqMessages(model, key,
+					"Summarize the KEY facts of this document part in tight bullets.",
+					[]chatEntry{{Role: "user", Content: string(runes[i:end])}}, 512)
+				if e2 != nil {
+					err = e2
+					break
+				}
+				chunks++
+				partials = append(partials, p)
+				if len(partials) >= 25 {
+					break
+				}
+			}
+			if err == nil {
+				summary, err = callGroqMessages(model, key, summarizeSystem,
+					[]chatEntry{{Role: "user", Content: "Combine these part-summaries into the final document summary:\n\n" + strings.Join(partials, "\n---\n")}}, btv)
+			}
 		}
-	case "cloudflare", "cf", "workersai":
-		payload, _ := json.Marshal(map[string]any{"messages": msgs})
-		var ok bool
-		body, ok = cfRun(w, "@cf/meta/llama-3.1-8b-instruct", payload)
-		if !ok {
+		if err != nil {
+			w.WriteHeader(502)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error(), "provider": "groq"})
 			return
 		}
-		code = 200
-	default:
-		jsonOut(w, 400, map[string]string{"error": "unknown CHAT_PROVIDER: " + provider})
-		return
+		json.NewEncoder(w).Encode(summarizeResp{Summary: summary, Chunks: chunks, Provider: "groq", Chars: len(runes)})
 	}
-
-	if err != nil {
-		jsonOut(w, 502, map[string]string{"error": "upstream unreachable: " + err.Error()})
-		return
-	}
-	if code != 200 {
-		jsonOut(w, 502, map[string]string{"error": fmt.Sprintf("%s brain said %d: %s", provider, code, string(body))})
-		return
-	}
-	if reply := parseAnyReply(body); reply != "" {
-		jsonOut(w, 200, map[string]string{"reply": reply, "provider": provider})
-		return
-	}
-	jsonOut(w, 502, map[string]string{"error": "unparseable brain answer: " + string(body)})
 }
 
-func imagineHandler(w http.ResponseWriter, r *http.Request) {
-	var in struct {
+func extractHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		f, hdr, err := r.FormFile("file")
+		if err != nil {
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(map[string]string{"error": "multipart form field \"file\" required"})
+			return
+		}
+		defer f.Close()
+		data, err := io.ReadAll(io.LimitReader(f, 32<<20))
+		if err != nil {
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(map[string]string{"error": "could not read your upload"})
+			return
+		}
+		text, err := extractText(hdr.Filename, data)
+		if err != nil {
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error(), "name": hdr.Filename})
+			return
+		}
+		if len([]rune(text)) > 400000 {
+			text = string([]rune(text)[:400000])
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"name": hdr.Filename, "chars": len([]rune(text)), "text": text,
+		})
+	}
+}
+
+func convertHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		f, hdr, err := r.FormFile("file")
+		if err != nil {
+			http.Error(w, "multipart form field \"file\" required", 400)
+			return
+		}
+		defer f.Close()
+		src, _, err := image.Decode(f)
+		if err != nil {
+			http.Error(w, "could not decode image (png/jpg/gif only)", 400)
+			return
+		}
+		format := r.FormValue("to")
+		width := atoi(r.FormValue("width"), 0)
+		dst := src
+		if width > 0 && src.Bounds().Dx() > width {
+			dst = resize(src, width)
+		}
+		switch format {
+		case "jpg":
+			w.Header().Set("Content-Type", "image/jpeg")
+			w.Header().Set("Content-Disposition", `attachment; filename="converted.jpg"`)
+			jpeg.Encode(w, dst, &jpeg.Options{Quality: 90})
+		case "png":
+			w.Header().Set("Content-Type", "image/png")
+			w.Header().Set("Content-Disposition", `attachment; filename="converted.png"`)
+			png.Encode(w, dst)
+		default:
+			http.Error(w, `"to" must be jpg or png`, 400)
+		}
+		_ = hdr
+	}
+}
+
+func imagineHandler() http.HandlerFunc {
+	type req struct {
 		Prompt string `json:"prompt"`
 		Width  int    `json:"width"`
 		Height int    `json:"height"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || strings.TrimSpace(in.Prompt) == "" {
-		jsonOut(w, 400, map[string]string{"error": `need {"prompt":"..."}`})
-		return
-	}
-	if in.Width == 0 || in.Height == 0 {
-		in.Width, in.Height = 1024, 1024
-	}
-	payload, _ := json.Marshal(map[string]any{
-		"prompt": in.Prompt, "steps": 4,
-	})
-	body, ok := cfRun(w, "@cf/black-forest-labs/flux-1-schnell", payload)
-	if !ok {
-		return
-	}
-	var final []byte
-	if len(body) > 0 && body[0] == '{' {
-		var p struct {
-			Result json.RawMessage `json:"result"`
-		}
-		json.Unmarshal(body, &p)
-		var imgs struct {
-			Image string `json:"image"`
-		}
-		if err := json.Unmarshal(p.Result, &imgs); err != nil || imgs.Image == "" {
-			jsonOut(w, 502, map[string]string{"error": "unparseable imagine answer: " + string(body)})
+	return func(w http.ResponseWriter, r *http.Request) {
+		var in req
+		if json.NewDecoder(r.Body).Decode(&in) != nil || strings.TrimSpace(in.Prompt) == "" {
+			http.Error(w, `send {"prompt":"...","width":1024,"height":1024}`, 400)
 			return
 		}
-		s := imgs.Image
-		if strings.HasPrefix(s, "data:") {
-			if i := strings.Index(s, ","); i >= 0 {
-				s = s[i+1:]
+		tok := os.Getenv("CF_API_TOKEN")
+		acc := os.Getenv("CF_ACCOUNT_ID")
+		if tok == "" || acc == "" {
+			http.Error(w, "imagine engine unplugged — CF_API_TOKEN/CF_ACCOUNT_ID empty", 503)
+			return
+		}
+		payload, _ := json.Marshal(map[string]any{
+			"prompt": in.Prompt, "steps": 4,
+		})
+		url := cfURL(acc, "@cf/black-forest-labs/flux-1-schnell")
+		hr, _ := http.NewRequest("POST", url, bytes.NewReader(payload))
+		hr.Header.Set("Authorization", "Bearer "+tok)
+		hr.Header.Set("Content-Type", "application/json")
+		rsp, err := (&http.Client{Timeout: 120 * time.Second}).Do(hr)
+		if err != nil {
+			http.Error(w, "cloudflare unreachable", 502)
+			return
+		}
+		defer rsp.Body.Close()
+		body, _ := io.ReadAll(io.LimitReader(rsp.Body, 64<<20))
+		if rsp.StatusCode != 200 {
+			http.Error(w, fmt.Sprintf("cloudflare said %d: %.400s", rsp.StatusCode, body), 502)
+			return
+		}
+		var j map[string]json.RawMessage
+		if err := json.Unmarshal(body, &j); err == nil {
+			w.Header().Set("Content-Type", "image/png")
+			if s, ok := j["result"]; ok {
+				var ri struct {
+					Image string `json:"image"`
+				}
+				json.Unmarshal(s, &ri)
+				if ri.Image != "" {
+					b, _ := toBytes(ri.Image)
+					w.Write(b)
+					return
+				}
 			}
 		}
-		b, err := base64.StdEncoding.DecodeString(s)
-		if err != nil {
-			jsonOut(w, 502, map[string]string{"error": "bad base64 from brain: " + err.Error()})
-			return
-		}
-		final = b
-	} else {
-		final = body
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Disposition", `attachment; filename="imagine.png"`)
+		w.Write(body)
 	}
-	w.Header().Set("Content-Type", "image/png")
-	w.Header().Set("Content-Disposition", `attachment; filename="imagine.png"`)
-	w.Write(final)
 }
 
-func resizeNN(img image.Image, w int) image.Image {
-	b := img.Bounds()
-	ow, oh := b.Dx(), b.Dy()
-	if ow == 0 || w >= ow {
-		return img
+func toBytes(b64 string) ([]byte, error) {
+	const enc = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+	var out []byte
+	acc, bits := 0, 0
+	for _, c := range b64 {
+		i := strings.IndexRune(enc, c)
+		if i < 0 {
+			continue
+		}
+		acc = acc<<6 | i
+		bits += 6
+		if bits >= 8 {
+			bits -= 8
+			out = append(out, byte(acc>>bits))
+		}
 	}
-	h := oh * w / ow
-	dst := image.NewRGBA(image.Rect(0, 0, w, h))
+	return out, nil
+}
+
+func atoi(s string, def int) int {
+	n := 0
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return def
+		}
+		n = n*10 + int(c-'0')
+	}
+	if n == 0 {
+		return def
+	}
+	return n
+}
+
+func resize(src image.Image, width int) image.Image {
+	b := src.Bounds()
+	h := width * b.Dy() / b.Dx()
+	dst := image.NewRGBA(image.Rect(0, 0, width, h))
 	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
-			dst.Set(x, y, img.At(b.Min.X+x*ow/w, b.Min.Y+y*oh/h))
+		for x := 0; x < width; x++ {
+			sx := x * b.Dx() / width
+			sy := y * b.Dy() / h
+			dst.Set(x, y, src.At(b.Min.X+sx, b.Min.Y+sy))
 		}
 	}
 	return dst
 }
 
-func imgConvert(data []byte, format string, width int) ([]byte, error) {
-	img, _, err := image.Decode(bytes.NewReader(data))
-	if err != nil {
-		return nil, fmt.Errorf("not a decodable image (png/jpg/gif): %v", err)
-	}
-	if width > 0 {
-		img = resizeNN(img, width)
-	}
-	buf := new(bytes.Buffer)
-	switch format {
-	case "png":
-		err = png.Encode(buf, img)
-	case "jpg":
-		err = jpeg.Encode(buf, img, &jpeg.Options{Quality: 90})
-	case "gif":
-		err = gif.Encode(buf, img, nil)
-	}
-	if err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
-
-func convertHandler(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, 32<<20)
-	if err := r.ParseMultipartForm(32 << 20); err != nil {
-		jsonOut(w, 400, map[string]string{"error": "bad upload: " + err.Error()})
-		return
-	}
-	f, hdr, err := r.FormFile("file")
-	if err != nil {
-		jsonOut(w, 400, map[string]string{"error": "no file in field 'file'"})
-		return
-	}
-	defer f.Close()
-	data, err := io.ReadAll(f)
-	if err != nil {
-		jsonOut(w, 500, map[string]string{"error": err.Error()})
-		return
-	}
-	mode := r.FormValue("mode")
-	width, _ := strconv.Atoi(r.FormValue("width"))
-	base := strings.TrimSuffix(hdr.Filename, path.Ext(hdr.Filename))
-	if base == "" {
-		base = "converted"
-	}
-	var out []byte
-	ext := "bin"
-	ctype := "application/octet-stream"
-	switch mode {
-	case "img2png", "img2jpg", "img2gif":
-		format := strings.TrimPrefix(mode, "img2")
-		out, err = imgConvert(data, format, width)
-		ext = format
-		ctype = "image/" + format
-	case "resize":
-		format := "png"
-		lower := strings.ToLower(hdr.Filename)
-		switch {
-		case strings.HasSuffix(lower, ".png"):
-			format = "png"
-		case strings.HasSuffix(lower, ".jpg"), strings.HasSuffix(lower, ".jpeg"):
-			format = "jpg"
-		case strings.HasSuffix(lower, ".gif"):
-			format = "gif"
-		}
-		out, err = imgConvert(data, format, width)
-		ext = format
-		ctype = "image/" + format
-	case "base64-enc":
-		out = []byte(base64.StdEncoding.EncodeToString(data))
-		ext, ctype = "txt", "text/plain"
-	case "base64-dec":
-		var buf []byte
-		buf, err = base64.StdEncoding.DecodeString(strings.TrimSpace(string(data)))
-		out = buf
-		ext, ctype = "txt", "application/octet-stream"
-	case "csv2json":
-		out, err = csv2json(data)
-		ext, ctype = "json", "application/json"
-	case "json2csv":
-		out, err = json2csv(data)
-		ext, ctype = "csv", "text/csv"
-	case "md2html":
-		out = md2html(data)
-		ext, ctype = "html", "text/html"
-	case "json-pretty":
-		var v any
-		if err = json.Unmarshal(data, &v); err == nil {
-			buf := new(bytes.Buffer)
-			en := json.NewEncoder(buf)
-			en.SetIndent("", "  ")
-			err = en.Encode(v)
-			out = buf.Bytes()
-		}
-		ext, ctype = "json", "application/json"
-	case "json-minify":
-		var v any
-		if err = json.Unmarshal(data, &v); err == nil {
-			out, err = json.Marshal(v)
-		}
-		ext, ctype = "json", "application/json"
-	default:
-		jsonOut(w, 400, map[string]string{"error": "unknown mode: " + mode})
-		return
-	}
-	if err != nil {
-		jsonOut(w, 422, map[string]string{"error": err.Error()})
-		return
-	}
-	w.Header().Set("Content-Type", ctype)
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.%s"`, base, ext))
-	w.Write(out)
-}
-
-func csv2json(data []byte) ([]byte, error) {
-	recs, err := csv.NewReader(bytes.NewReader(data)).ReadAll()
-	if err != nil {
-		return nil, err
-	}
-	if len(recs) == 0 {
-		return []byte("[]"), nil
-	}
-	head := recs[0]
-	rows := []map[string]string{}
-	for _, rec := range recs[1:] {
-		m := map[string]string{}
-		for i, cell := range rec {
-			if i < len(head) {
-				m[head[i]] = cell
-			}
-		}
-		rows = append(rows, m)
-	}
-	buf := new(bytes.Buffer)
-	en := json.NewEncoder(buf)
-	en.SetIndent("", "  ")
-	err = en.Encode(rows)
-	return buf.Bytes(), err
-}
-
-func json2csv(data []byte) ([]byte, error) {
-	var arr []map[string]any
-	if err := json.Unmarshal(data, &arr); err != nil {
-		return nil, fmt.Errorf("expected a JSON array of objects: %v", err)
-	}
-	if len(arr) == 0 {
-		return []byte{}, nil
-	}
-	keyset := map[string]bool{}
-	var keys []string
-	for _, row := range arr {
-		for k := range row {
-			if !keyset[k] {
-				keyset[k] = true
-				keys = append(keys, k)
-			}
-		}
-	}
-	sort.Strings(keys)
-	buf := new(bytes.Buffer)
-	w := csv.NewWriter(buf)
-	w.Write(keys)
-	for _, row := range arr {
-		rec := make([]string, len(keys))
-		for i, k := range keys {
-			rec[i] = fmt.Sprint(row[k])
-		}
-		w.Write(rec)
-	}
-	w.Flush()
-	return buf.Bytes(), w.Error()
-}
-
-func pair(s, mark, open, close string) string {
-	for {
-		i := strings.Index(s, mark)
-		if i < 0 {
-			return s
-		}
-		j := strings.Index(s[i+len(mark):], mark)
-		if j < 0 {
-			return s
-		}
-		s = s[:i] + open + s[i+len(mark):i+len(mark)+j] + close + s[i+len(mark)+j+len(mark):]
-	}
-}
-
-func md2html(data []byte) []byte {
-	esc := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
-	inline := func(s string) string {
-		s = pair(s, "**", "<strong>", "</strong>")
-		s = pair(s, "`", "<code>", "</code>")
-		return s
-	}
-	var out strings.Builder
-	out.WriteString("<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head><body>\n")
-	inUL := false
-	for _, line := range strings.Split(string(data), "\n") {
-		t := strings.TrimSpace(line)
-		switch {
-		case strings.HasPrefix(t, "- "):
-			if !inUL {
-				out.WriteString("<ul>")
-				inUL = true
-			}
-			out.WriteString("<li>" + inline(esc.Replace(t[2:])) + "</li>")
-		default:
-			if inUL {
-				out.WriteString("</ul>")
-				inUL = false
-			}
-			switch {
-			case strings.HasPrefix(t, "### "):
-				out.WriteString("<h3>" + inline(esc.Replace(t[4:])) + "</h3>")
-			case strings.HasPrefix(t, "## "):
-				out.WriteString("<h2>" + inline(esc.Replace(t[3:])) + "</h2>")
-			case strings.HasPrefix(t, "# "):
-				out.WriteString("<h1>" + inline(esc.Replace(t[2:])) + "</h1>")
-			case t == "":
-			default:
-				out.WriteString("<p>" + inline(esc.Replace(t)) + "</p>")
-			}
-		}
-	}
-	if inUL {
-		out.WriteString("</ul>")
-	}
-	out.WriteString("\n</body></html>")
-	return []byte(out.String())
-}
-
 func main() {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("ok"))
-	})
-	mux.HandleFunc("POST /api/convert", convertHandler)
-	mux.HandleFunc("POST /api/chat", chatHandler)
-	mux.HandleFunc("POST /api/imagine", imagineHandler)
-	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	prov := os.Getenv("CHAT_PROVIDER")
+	if prov == "" {
+		prov = "cloudflare"
+	}
+	model := os.Getenv("CHAT_MODEL")
+	if model == "" {
+		model = "@cf/meta/llama-3.1-8b-instruct"
+	}
+	budget := atoi(os.Getenv("CHAT_BUDGET"), 1024)
+
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		h := strings.ToLower(r.Host)
+		if strings.HasPrefix(h, "seanneol.com") || strings.HasPrefix(h, "www.seanneol.com") {
+			w.Header().Set("Content-Type", "text/html")
+			w.Write(hobbyHTML)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html")
 		w.Write(indexHTML)
 	})
-	log.Println("lab listening on :8080")
-	log.Fatal(http.ListenAndServe(":8080", mux))
+	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "provider": prov, "model": model})
+	})
+	http.HandleFunc("/api/chat", withLimit(chatHandler(prov, model, budget)))
+	http.HandleFunc("/api/summarize", withLimit(summarizeHandler(prov, model, budget)))
+	http.HandleFunc("/api/extract", withLimit(extractHandler()))
+	http.HandleFunc("/api/convert", withLimit(convertHandler()))
+	http.HandleFunc("/api/convert-doc", withLimit(convertDocHandler()))
+	http.HandleFunc("/api/imagine", withLimit(imagineHandler()))
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	log.Println("lab listening on :" + port)
+	log.Fatal(http.ListenAndServe(":"+port, nil))
+}
+// ---------------- document conversion ----------------
+
+func convertDocHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		f, hdr, err := r.FormFile("file")
+		if err != nil {
+			http.Error(w, "multipart form field \"file\" required", 400)
+			return
+		}
+		defer f.Close()
+		data, err := io.ReadAll(io.LimitReader(f, 32<<20))
+		if err != nil {
+			http.Error(w, "upload too large or unreadable", 400)
+			return
+		}
+		to := r.FormValue("to")
+		base := strings.TrimSuffix(filepath.Base(hdr.Filename), filepath.Ext(hdr.Filename))
+
+		if to == "txt" {
+			text, err := extractText(hdr.Filename, data)
+			if err != nil {
+				http.Error(w, err.Error(), 400)
+				return
+			}
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.Header().Set("Content-Disposition", `attachment; filename="`+base+`.txt"`)
+			w.Write([]byte(text))
+			return
+		}
+
+		if strings.ToLower(filepath.Ext(hdr.Filename)) != ".pdf" {
+			http.Error(w, "docx/slides conversion requires a .pdf input", 400)
+			return
+		}
+		tmp, err := os.CreateTemp("", "lab-doc-*.pdf")
+		if err != nil {
+			http.Error(w, "temp file failed", 500)
+			return
+		}
+		src := tmp.Name()
+		defer os.Remove(src)
+		if _, err := tmp.Write(data); err != nil {
+			tmp.Close()
+			http.Error(w, "temp write failed", 500)
+			return
+		}
+		tmp.Close()
+
+		var out string
+		ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+		defer cancel()
+		var cmd *exec.Cmd
+		switch to {
+		case "docx":
+			out = src + ".docx"
+			cmd = exec.CommandContext(ctx, "python3", "-m", "pdf2docx", "convert", src, out)
+		case "pptx":
+			out = src + ".pptx"
+			cmd = exec.CommandContext(ctx, "python3", "/app/tools/pdf2slides.py", src, out)
+		default:
+			http.Error(w, `form value "to" must be txt, docx, or pptx`, 400)
+			return
+		}
+		defer os.Remove(out)
+
+		if blob, err := cmd.CombinedOutput(); err != nil {
+			http.Error(w, fmt.Sprintf("converter said: %v :: %.300s", err, blob), 422)
+			return
+		}
+		conv, err := os.ReadFile(out)
+		if err != nil {
+			http.Error(w, "conversion produced no file (heavy layout?)", 422)
+			return
+		}
+		mime := "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+		if to == "pptx" {
+			mime = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+		}
+		w.Header().Set("Content-Type", mime)
+		w.Header().Set("Content-Disposition", `attachment; filename="`+base+"."+to+`"`)
+		w.Write(conv)
+	}
 }
