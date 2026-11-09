@@ -15,6 +15,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -274,6 +275,30 @@ func callArenaAnthropic(prompt string, maxToks int, key string) (string, error) 
 func jsonString(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
+}
+
+func verifyTurnstile(tok, ip string) bool {
+    secret := os.Getenv("TURNSTILE_SECRET")
+    if secret == "" { return true }
+    if tok == "" { return false }
+    resp, err := http.PostForm("https://challenges.cloudflare.com/turnstile/v0/siteverify",
+        url.Values{"secret": {secret}, "response": {tok}, "remoteip": {ip}})
+    if err != nil { return false }
+    defer resp.Body.Close()
+    var out struct{ Success bool `json:"success"` }
+    if json.NewDecoder(resp.Body).Decode(&out) != nil { return false }
+    return out.Success
+}
+
+func withTurnstile(next http.HandlerFunc) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        if !verifyTurnstile(r.Header.Get("X-Turnstile-Token"), r.RemoteAddr) {
+            w.Header().Set("Content-Type", "application/json")
+            http.Error(w, `{"error":"turnstile: prove humanity"}`, http.StatusForbidden)
+            return
+        }
+        next(w, r)
+    }
 }
 
 // ---------------- HTTP handlers ----------------
@@ -629,12 +654,12 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "provider": prov, "model": model})
 	})
-	http.HandleFunc("/api/chat", withLimit(chatHandler(prov, model, budget)))
-	http.HandleFunc("/api/summarize", withLimit(summarizeHandler(prov, model, budget)))
-	http.HandleFunc("/api/extract", withLimit(extractHandler()))
-	http.HandleFunc("/api/convert", withLimit(convertHandler()))
-	http.HandleFunc("/api/convert-doc", withLimit(convertDocHandler()))
-	http.HandleFunc("/api/imagine", withLimit(imagineHandler()))
+	http.HandleFunc("/api/chat", withLimit(withTurnstile(chatHandler(prov, model, budget))))
+	http.HandleFunc("/api/summarize", withLimit(withTurnstile(summarizeHandler(prov, model, budget))))
+	http.HandleFunc("/api/extract", withLimit(withTurnstile(extractHandler())))
+	http.HandleFunc("/api/convert", withLimit(withTurnstile(convertHandler())))
+	http.HandleFunc("/api/convert-doc", withLimit(withTurnstile(convertDocHandler())))
+	http.HandleFunc("/api/imagine", withLimit(withTurnstile(imagineHandler())))
 
 	port := os.Getenv("PORT")
 	if port == "" {

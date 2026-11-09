@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
 <title>seanneol lab · converter, docs &amp; pocket AI</title>
 <meta name="description" content="seanneol lab: file converter, document summarizer &amp; pocket AI — one Go binary on the homelab.">
 <style>
@@ -128,7 +129,7 @@ function pick(f){if(!f)return;file=f;$('go').disabled=false;$('dl').style.displa
 $('go').addEventListener('click',async()=>{if(!file){out('<span class="err">drop an image first…</span>');return;}
   $('go').disabled=true;out('⬆ converting…');
   const fd=new FormData();fd.append('file',file);fd.append('to',$('fmt').value);
-  try{const r=await fetch('/api/convert',{method:'POST',body:fd});
+  try{const r=await F('/api/convert',{method:'POST',body:fd});
     const b=await r.blob();
     if(!r.ok)throw new Error(`HTTP ${r.status} · ${(await b.text()).slice(0,200)}`);
     dlBlob=b;dlName=b.type.includes('jpeg')?'converted.jpg':'converted.png';
@@ -148,13 +149,13 @@ $('dgo').addEventListener('click',async()=>{
   const to=$('dTo').value;$('dgo').disabled=true;dout('⚙ working… (heavy PDFs can take a minute)');
   try{const fd=new FormData();fd.append('file',f);
     if(to==='txt'){
-      const r=await fetch('/api/extract',{method:'POST',body:fd});
+      const r=await F('/api/extract',{method:'POST',body:fd});
       const j=await r.json();if(!r.ok)throw new Error(j.error||('HTTP '+r.status));
       docText=j.text;docNm=j.name;
       saveBlob(new Blob([j.text],{type:'text/plain'}), j.name+'.txt');
       dout(`✅ ${j.chars} chars — also ready for 📥/✨ below`);
     }else{
-      const r=await fetch('/api/convert-doc',{method:'POST',body:(()=>{const x=new FormData();x.append('file',f);x.append('to',to);return x;})()});
+      const r=await F('/api/convert-doc',{method:'POST',body:(()=>{const x=new FormData();x.append('file',f);x.append('to',to);return x;})()});
       if(!r.ok)throw new Error(`HTTP ${r.status} · ${(await r.text()).slice(0,300)}`);
       const b=await r.blob();
       saveBlob(b, f.name.replace(/\.[^.]*$/,'')+'.'+to);
@@ -166,7 +167,7 @@ $('dTxt2Chat').addEventListener('click',async()=>{
   const f=$('df').files[0];if(!f){dout('<span class="err">choose a document first</span>');return;}
   $('dTxt2Chat').disabled=true;
   try{const fd=new FormData();fd.append('file',f);
-    const r=await fetch('/api/extract',{method:'POST',body:fd});
+    const r=await F('/api/extract',{method:'POST',body:fd});
     const j=await r.json();if(!r.ok)throw new Error(j.error||('HTTP '+r.status));
     docText=j.text;docNm=j.name;
     addMsg(`📄 ${docNm} — text loaded (${j.chars} chars) — ready for ✨ Summarize`,`ai`);
@@ -176,7 +177,7 @@ $('dSum').addEventListener('click',async()=>{
   if(!docText){dout('<span class="err">first load text (📥 or use the →Text direction)</span>');return;}
   $('dSum').disabled=true;
   const think=addMsg('🤔 summarizing…','ai',true);
-  try{const r=await fetch('/api/summarize',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:docText})});
+  try{const r=await F('/api/summarize',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:docText})});
     const j=await r.json();if(!r.ok)throw new Error(j.error||('HTTP '+r.status));
     think.innerHTML=`📄 <b>${esc(docNm)}</b> — summary:\n\n${esc(j.summary)}<div class="meta">🤖 via ${esc(j.provider)} · ${j.chunks} chunk(s) · ${j.chars} chars</div>`;
     hist.push({role:'assistant',content:'📄 '+docNm+' — summary:\n'+j.summary});
@@ -188,7 +189,7 @@ const hist=[];
 const send=$('send');
 function addMsg(t,cls,html){const d=document.createElement('div');d.className='msg '+cls;if(html)d.innerHTML=t;else d.textContent=t;$('hist').appendChild(d);$('hist').scrollTop=$('hist').scrollHeight;return d;}
 function sendMsg(){const msg=$('ta').value.trim();if(!msg)return;addMsg(msg,'user');hist.push({role:'user',content:msg});$('ta').value='';send.disabled=true;const think=addMsg('…','ai');
-  fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:msg,sessionId:$('sid').value,budget:+$('budget').value,history:hist.slice(-24)})})
+  F('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:msg,sessionId:$('sid').value,budget:+$('budget').value,history:hist.slice(-24)})})
   .then(r=>r.json().then(j=>({ok:r.ok,j}))).then(({ok,j})=>{if(!ok)throw new Error(j.error||'HTTP');
     think.innerHTML=esc(j.reply)+`<div class="meta">🤖 via ${esc(j.provider)}</div>`;hist.push({role:'assistant',content:j.reply});})
   .catch(e=>{think.className='msg err';think.textContent='❌ '+e.message;})
@@ -201,12 +202,14 @@ $('budget').addEventListener('input',()=>$('bl').textContent=$('budget').value);
 $('igo').addEventListener('click',async()=>{
   const prompt=$('ipr').value.trim();if(!prompt){$('io').innerHTML='<span class="err">prompt needed</span>';return;}
   $('igo').disabled=true;$('io').innerHTML='🎨 dreaming… ~30-60s';
-  try{const r=await fetch('/api/imagine',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt})});
+  try{const r=await F('/api/imagine',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt})});
     if(!r.ok)throw new Error(`HTTP ${r.status} · ${(await r.text()).slice(0,200)}`);
     const b=await r.blob();
     $('io').innerHTML=`<img src="${URL.createObjectURL(b)}" style="max-width:100%;border-radius:12px;margin-top:10px">`;
   }catch(e){$('io').innerHTML=`<span class="err">❌ ${esc(e.message)}</span>`}
   $('igo').disabled=false;});
 </script>
+<script>async function F(u,o={}){if(window.turnstile)window.__ts=turnstile.getResponse();o.headers=Object.assign({},o.headers,{"X-Turnstile-Token":window.__ts||""});return fetch(u,o)}</script>
+<div class="cf-turnstile" data-sitekey="0x4AAAAAAF5w2Haa6UDc0KV7" data-callback="t=>window.__ts=t" data-size="compact" style="margin:24px auto;display:table"></div>
 </body>
 </html>
