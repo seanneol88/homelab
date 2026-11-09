@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lab
+  namespace: lab
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: lab}
+  template:
+    metadata:
+      labels: {app: lab}
+    spec:
+      containers:
+        - name: lab
+          image: lab-lab:latest
+          imagePullPolicy: IfNotPresent
+          ports: [{containerPort: 8080}]
+          envFrom:
+            - secretRef: {name: lab-env}
+          readinessProbe:
+            httpGet: {path: /healthz, port: 8080}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /healthz, port: 8080}
+            initialDelaySeconds: 10
+            periodSeconds: 15
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lab
+  namespace: lab
+spec:
+  selector: {app: lab}
+  ports: [{port: 8080, targetPort: 8080}]
