@@ -28,6 +28,8 @@ var indexHTML []byte
 
 //go:embed static/hobby.html
 var hobbyHTML []byte
+//go:embed static/reading-nook.jpg
+var readingNookJPG []byte
 const chatSystem = "You are a helpful assistant living on seanneol lab (lab.seanneol.com), a homelab showcase. Be concise, friendly, and honest. Never claim to have abilities you do not have."
 const summarizeSystem = "You are a precise document summarizer. Output: 1) a 2-3 sentence TL;DR, 2) bullet key points, 3) notable entities/figures if any. Be faithful to the source; do not invent facts. If the excerpt is cut mid-phrase, ignore the fragment."
 
@@ -660,7 +662,11 @@ func main() {
 	http.HandleFunc("/api/convert", withLimit(withTurnstile(convertHandler())))
 	http.HandleFunc("/api/convert-doc", withLimit(withTurnstile(convertDocHandler())))
 	http.HandleFunc("/api/imagine", withLimit(withTurnstile(imagineHandler())))
-
+	http.HandleFunc("/reading-nook.jpg", func(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "image/jpeg")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	_, _ = w.Write(readingNookJPG)
+})
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
